@@ -1,0 +1,22 @@
+{
+  "name": "peernet-js",
+  "version": "0.0.1",
+  "description": "peernet.js provides a simple message acknowledgement layer built using OpenPGP and IPFS pubsub.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Tony Rice <tony@tonyrice.me>",
+  "license": "MIT",
+  "dependencies": {
+    "crypto-js": "^4.0.0",
+    "ipfs": "^0.44.0",
+    "ipfs-only-hash": "^2.0.1",
+    "ipld-dag-pb": "^0.18.5",
+    "openpgp": "^4.10.4"
+  },
+  "browser": {
+    "openpgp": "openpgp/dist/openpgp.min.js",
+    "ipfs": "ipfs/dist/index.min.js"
+  }
+}

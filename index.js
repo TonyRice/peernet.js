@@ -249,6 +249,7 @@ class PeerNet {
             });
 
             relayKeyMap.set(hostData.address, true);
+            a();
         });
     }
 

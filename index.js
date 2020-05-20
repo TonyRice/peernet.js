@@ -124,7 +124,7 @@ class PeerNet {
                 // A client key is generated on each use. It is only used by the browser during the instance
                 // session.
                 const {privateKeyArmored, publicKeyArmored, revocationCertificate} = await openpgp.generateKey({
-                    userIds: [{name: uuidv4(), email: 'web-client@peerwork.io'}], // you can pass multiple user IDs
+                    userIds: [{name: uuidv4(), email: 'web-client@peernet.dev'}], // you can pass multiple user IDs
                     curve: 'ed25519',
                     passphrase: this.privateKeyPass
                 });

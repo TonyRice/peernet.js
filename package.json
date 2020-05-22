@@ -1,6 +1,6 @@
 {
   "name": "peernet-js",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "peernet.js provides a simple message acknowledgement layer built using OpenPGP and IPFS pubsub.",
   "main": "index.js",
   "scripts": {
@@ -12,8 +12,10 @@
     "crypto-js": "^4.0.0",
     "ipfs": "^0.44.0",
     "ipfs-only-hash": "^2.0.1",
-    "ipld-dag-pb": "^0.18.5",
-    "openpgp": "^4.10.4"
+    "openpgp": "^4.10.4",
+    "threads": "^1.4.1",
+    "winston": "^3.2.1",
+    "winston-transport-browserconsole": "^1.0.5"
   },
   "browser": {
     "openpgp": "openpgp/dist/openpgp.min.js",

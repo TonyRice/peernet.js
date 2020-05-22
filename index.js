@@ -1,516 +1,871 @@
-const IPFS = require('ipfs')
-const openpgp = require('openpgp');
+const {spawn, Worker} = require("threads");
+const IPFS = require('ipfs');
+const Hash = require('ipfs-only-hash');
 const sha1 = require('crypto-js/sha1');
 const Base64 = require('crypto-js/enc-base64');
+
+const {generateKeyPair, sign, verify} = require('./lib/util/crypto');
+const {sleep, uuidv4, randomData} = require('./lib/util');
+const {add, cat, pin, unpin, connect, DEFAULT_BOOTSTRAP, DEFAULT_BOOTSTRAP_BROWSER} = require('./lib/util/ipfs');
+const logger = require('./lib/util/logger')
+
+const {PEERNET_BOOTSTRAP, PEERNET_BOOTSTRAP_BROWSER} = require('./lib/util/peernet');
+
 const isBrowser = (typeof window) !== 'undefined';
 
 if (!isBrowser) {
     ipfsClient = require('ipfs-http-client');
 }
 
-const Hash = require('ipfs-only-hash');
+class Peer {
+    #started = false;
+    #crypto = null;
 
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    #bootstraps;
+    #proxyMode;
+    #proxyHost;
 
-function uuidv4() {
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
-        var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
-        return v.toString(16);
-    });
-}
+    #publicKey;
+    #privateKey;
+    #privateKeyArmored;
+    #privateKeyPass;
 
+    #relayMessages;
+    #handleMessages;
 
-const hostCache = new Map();
-async function getHostData(ipfs, host) {
+    #passthrough;
+    #passthroughPeers;
 
-    // todo attempt to validate.
-    if (hostCache.has(host)) {
-        return Promise.resolve(hostCache.get(host));
+    #checkPubAcks;
+    #ackExists;
+    #storeAck;
+
+    #relays;
+    #relayPeers;
+    #relayedPeers = new Map();
+
+    #subscriptions = new Map();
+
+    #replyHosts = new Map();
+    #msgCache = new Map();
+
+    #replyCallbacks = new Map();
+    #peerPubKeyCache = new Map();
+
+    #config;
+
+    #bootstrapTimer = -1;
+
+    // Note: private methods are declared as variables for
+    // NodeJS 12.x.x support
+    #checkInitialized = () => {
+        if (this.ipfs !== null && this.#started === true) {
+            return;
+        }
+
+        throw "Not initialized!";
     }
 
-    let hostPubKey;
-
-    if (host.trim().indexOf('-----BEGIN PGP PUBLIC KEY BLOCK-----') === 0) {
-        hostPubKey = host;
-    } else {
-        try {
-
-            const stream = ipfs.cat(host, {'timeout': '60s'});
-
-            let data = ''
-
-            for await (const chunk of stream) {
-                data += chunk.toString()
+    #reconnectBootstraps = async () => {
+        const peers = await this.ipfs.swarm.peers();
+        const peerAddrs = peers.map((peer) => {
+            return peer.addr.toString();
+        });
+        for (const addr of this.#bootstraps) {
+            if (peerAddrs.indexOf(addr) === -1) {
+                try {
+                    logger.debug('Attempting to re-connect to IPFS node: ' + addr);
+                    await connect(this.ipfs, addr);
+                    logger.debug('Connected to IPFS node: ' + addr);
+                } catch (err) {
+                    console.log(err);
+                }
             }
-
-            hostPubKey = data;
-        } catch (e) {
-            return Promise.reject(e);
         }
     }
 
-    const address = sha1(hostPubKey.replace('\r\n', '').replace('\n').trim() + '.address');
+    #getPeerData = (async (peer) => {
+        this.#checkInitialized();
 
-    const data = {
-        'publicKey': hostPubKey,
-        'address': Base64.stringify(address)
-    }
+        const ipfs = this.ipfs;
 
-    hostCache.set(host, data);
+        // todo attempt to validate.
+        if (this.#peerPubKeyCache.has(peer)) {
+            return Promise.resolve(this.#peerPubKeyCache.get(peer));
+        }
 
-    return Promise.resolve(data);
-}
+        let peerPubKey;
 
-function generateRandomData() {
-    // this will be used for generating things like acks and such
+        if (peer.trim().indexOf('-----BEGIN PGP PUBLIC KEY BLOCK-----') === 0) {
+            peerPubKey = peer;
+        } else {
+            try {
+                const stream = await cat(ipfs, peer, '60s');
+                if (stream == null) {
+                    return Promise.reject("Could not find peer data using the CID \"" + peer + "\".");
+                }
 
-    return uuidv4()
-}
+                if (stream.indexOf('-----BEGIN PGP PUBLIC KEY BLOCK-----') === 0) {
+                    peerPubKey = stream;
 
+                    await pin(ipfs, peer);
+                } else {
+                    try {
+                        const jsonData = JSON.parse(stream);
+                        if (jsonData.hasOwnProperty('publicKey')) {
+                            peerPubKey = jsonData['publicKey'];
+                        }
+                    } catch (ignored) {
+                        return Promise.reject('Invalid peer data detected!');
+                    }
+                }
+            } catch (err) {
+                return Promise.reject(err);
+            }
+        }
 
-const msgCache = new Map();
-const relayKeyMap = new Map();
+        const address = sha1(peerPubKey.replace('\r\n', '').replace('\n').trim() + '.address');
 
-class PeerNet {
+        const data = {
+            'publicKey': peerPubKey,
+            'address': Base64.stringify(address)
+        }
+
+        this.#peerPubKeyCache.set(peer, data);
+
+        return Promise.resolve(data);
+    });
 
     constructor(config) {
         config = config ? config : {
             relays: []
         }
 
-        this.bootstraps = config.bootstrap ? config.bootstrap : [];
+        this.#bootstraps = config.bootstrap ? config.bootstrap : [];
 
-        this.proxyMode = config.proxy ? config.proxy === true : false;
-        this.publicKey = config.publicKey ? config.publicKey : null;
-        this.privateKey = config.privateKey ? config.privateKey : null;
-        this.privateKeyPass = config.privateKeyPass ? config.privateKeyPass : null;
-        this.relayMessages = config.relay ? config.relay === true : false;
+        if (isBrowser) {
+            this.#bootstraps = this.#bootstraps.concat(PEERNET_BOOTSTRAP_BROWSER);
+        } else {
+            this.#bootstraps = this.#bootstraps.concat(PEERNET_BOOTSTRAP);
+        }
 
-        // relay hosts are peers
-        // you wish to attempt
-        // to relay data through
-        // these nodes are very public.
-        this.relays = config.relays ? config.relays : [];
+        this.#proxyMode = config.proxy ? config.proxy === true : false;
+        this.#proxyHost = config.proxyHost ? config.proxyHost : 'http://localhost:5001';
+        this.#publicKey = config.publicKey ? config.publicKey : null;
+        this.#privateKey = config.privateKey ? config.privateKey : null;
+        this.#privateKeyPass = config.privateKeyPass ? config.privateKeyPass : null;
+
+        // this will tell the server to act as a passthrough relay for it's own messages
+        this.#passthrough = config.passthrough ? config.passthrough === true : false;
+
+        // these are hosts we wish to handle data for in a passthrough manner.
+        this.#passthroughPeers = config.passthroughPeers ? config.passthroughPeers : [];
+
+        // this tells the node that it is able to relay messages directly
+        this.#relayMessages = config.relay ? config.relay === true && this.#passthrough === false : false;
+        // trusted hosts are hosts that we allow messages to be relayed
+        // to if we are in relay mode.
+        this.#relayPeers = config.relayPeers ? config.relayPeers : [];
+
+        // this tells the node that it will receive and process messages directly.
+        this.#handleMessages = config.receive ? config.receive === true && this.#passthrough === false : false;
+
+        // If a peer is considered a single peer, it won't check for acks
+        this.#checkPubAcks = config.standalone ? config.standalone !== true : true;
+
+        this.#ackExists = (typeof config.ackExists) === 'function' ? config.ackExists : null;
+        this.#storeAck = (typeof config.storeAck) === 'function' ? config.storeAck : null;
+
+        // this is where we will send any relay data to.
+        // these nodes help ensure deliverability of our messages.
+        this.#relays = config.relays ? config.relays : [];
+
+        this.#config = config ? config : {};
+
+        this.#bootstrapTimer = -1;
+
+    }
+
+    async start() {
+        return this.init();
+    }
+
+    async stop() {
+        if (this.ipfs == null) {
+            return Promise.reject('Peer not started!');
+        }
+
+        try {
+            for (const entry of this.#subscriptions.entries()) {
+                await this.ipfs.pubsub.unsubscribe(entry[0], entry[1]);
+            }
+            if (this.#proxyMode === false) {
+                await this.ipfs.stop();
+            }
+        } finally {
+            this.ipfs = null;
+            this.#crypto = null;
+            this.#started = false;
+        }
     }
 
     init() {
-        const self = this;
-        if (self.ipfs != null) {
+        if (this.ipfs != null && this.#started) {
             return Promise.resolve({
-                publicKey: this.publicKey,
-                privateKey: this.privateKeyArmored
+                publicKey: this.#publicKey,
+                privateKey: this.#privateKey
             });
         }
 
         return new Promise(async (accept, reject) => {
 
-            if (this.privateKey != null) {
+            logger.info('Initializing...');
 
-                const {keys: [privateKey]} = await openpgp.key.readArmored(this.privateKey);
+            try {
 
-                this.privateKeyArmored = this.privateKey;
+                // this will help us handle crypto operations.
+                this.#crypto = await spawn(new Worker("./lib/workers/crypto"));
 
-                try {
-                    await privateKey.decrypt(this.privateKeyPass);
-                } catch (e) {
-                    return reject(e);
+                if (this.#privateKey != null) {
+                    this.#privateKeyArmored = this.#privateKey;
+                } else {
+
+                    logger.debug('Generating private/public keys...');
+
+                    this.#privateKeyPass = this.#privateKeyPass != null ? this.#privateKeyPass : uuidv4();
+
+                    // A client key is generated on each use. It is only used by the browser during the instance
+                    // session.
+                    const {privateKeyArmored, publicKeyArmored} = await generateKeyPair(uuidv4(), 'web-client@peernet.dev', this.#privateKeyPass)
+
+                    this.#privateKeyArmored = privateKeyArmored;
+
+                    this.#publicKey = publicKeyArmored;
                 }
 
-                this.privateKey = privateKey;
+                logger.debug('Initializing IPFS...');
 
-            } else {
-                this.privateKeyPass = this.privateKeyPass != null ? this.privateKeyPass : uuidv4();
+                let node;
 
-                // A client key is generated on each use. It is only used by the browser during the instance
-                // session.
-                const {privateKeyArmored, publicKeyArmored, revocationCertificate} = await openpgp.generateKey({
-                    userIds: [{name: uuidv4(), email: 'web-client@peernet.dev'}], // you can pass multiple user IDs
-                    curve: 'ed25519',
-                    passphrase: this.privateKeyPass
+                if (this.#proxyMode === true) {
+                    node = ipfsClient(this.#proxyHost);
+                    await node.id()
+                    this.ipfs = node;
+                } else {
+                    let options;
+
+                    // The browser uses a different set of bootstrap nodes.
+                    if (!isBrowser) {
+                        options = {
+                            repo: this.#config.repo ? this.#config.repo : undefined,
+                            config: {
+                                // If you want to connect to the public bootstrap nodes, remove the next line
+                                Bootstrap: this.#bootstraps.concat(DEFAULT_BOOTSTRAP)
+                            }
+                        }
+                    } else {
+                        options = {
+                            repo: 'ipfs-' + Math.random(),
+                            config: {
+                                Addresses: {
+                                    Swarm: []
+                                },
+                                // If you want to connect to the public bootstrap nodes, remove the next line
+                                Bootstrap: this.#bootstraps.concat(
+                                    DEFAULT_BOOTSTRAP_BROWSER
+                                )
+                            }
+                        }
+                    }
+
+                    logger.debug('Starting IPFS...');
+
+                    node = await IPFS.create(options);
+                    await node.id();
+                    this.ipfs = node;
+                }
+
+                logger.debug('Waiting for IPFS peers...');
+
+                let waiting = true;
+
+                setTimeout(() => {
+                    waiting = false
+                }, 5000);
+
+                // let's just add some startup time
+                // to give some time to check for some peers
+                while (waiting) {
+                    let peers = await node.swarm.peers();
+                    if (peers.length > 1) {
+                        waiting = false;
+                    } else {
+                        await sleep(150);
+                    }
+                }
+
+                // Note: let's add our peer data to IPFS
+                const peerCid = await add(node, this.#publicKey);
+
+                logger.debug('Pinning peer CID: ' + peerCid);
+
+                await pin(node, peerCid);
+
+                logger.debug('Adding direct relay peers...');
+
+                // these are hosts that we are relaying data for.
+                // we need to add these to the this.#relayedPeers map
+                // to tell the peer to allow these messages to be relayed
+                for (const peer of this.#relayPeers) {
+                    const peerData = await this.#getPeerData(peer);
+
+                    // for non passthrough mode
+                    // this must be false
+                    this.#relayedPeers.set(peerData.address, false);
+                }
+
+                logger.debug('Configuring pass-through relay peers...');
+
+                for (const peer of this.#passthroughPeers) {
+                    await this.relayPeer(peer, true);
+                }
+
+                // This will attempt to keep things connected.
+                this.#bootstrapTimer = setInterval(async () => {
+                    await this.#reconnectBootstraps();
+                }, 15000 * 3);
+
+                this.#started = true;
+
+                logger.info('Started! Your peer CID is: ' + peerCid);
+
+                accept({
+                    publicKey: this.#publicKey,
+                    privateKey: this.#privateKeyArmored
                 });
-
-                const {keys: [privateKey]} = await openpgp.key.readArmored(privateKeyArmored);
-
-                await privateKey.decrypt(this.privateKeyPass);
-
-                this.privateKey = privateKey;
-                this.privateKeyArmored = privateKeyArmored;
-                this.publicKey = publicKeyArmored;
+            } catch (err) {
+                reject(err);
             }
-
-            let node;
-
-            if (this.proxyMode === true) {
-                node = ipfsClient('http://localhost:5001');
-                await node.id()
-                self.ipfs = node;
-            } else {
-                let options;
-
-                // The browser uses a different set of bootstrap nodes.
-                if ((typeof window) === 'undefined') {
-                    options = {
-                        config: {
-                            // If you want to connect to the public bootstrap nodes, remove the next line
-                            Bootstrap: this.bootstraps.concat([
-                                "/ip4/107.152.37.101/tcp/4001/p2p/QmaM3FbA8amt6WGeN9Zq7zz8EmGxwdcAeHtcAUx3SoxkWF",
-                                "/ip6/2607:9000:0:19:216:3cff:fe80:9c47/tcp/4001/p2p/QmaM3FbA8amt6WGeN9Zq7zz8EmGxwdcAeHtcAUx3SoxkWF",
-                                "/ip6/2607:9000:0:28:216:3cff:fe80:9c47/tcp/4001/p2p/QmaM3FbA8amt6WGeN9Zq7zz8EmGxwdcAeHtcAUx3SoxkWF",
-                                '/dns4/nyc-1.bootstrap.libp2p.io/tcp/4001/p2p/QmSoLueR4xBeUbY9WZ9xGUUxunbKWcrNFTDAadQJmocnWm',
-                                '/dns4/nyc-2.bootstrap.libp2p.io/tcp/4001/p2p/QmSoLV4Bbm51jM9C4gDYZQ9Cy3U6aXMJDAbzgu2fzaDs64',
-                                '/dns4/ams-1.bootstrap.libp2p.io/tcp/4001/p2p/QmSoLer265NRgSp2LA3dPaeykiS1J6DifTC88f5uVQKNAd',
-                                '/dns4/lon-1.bootstrap.libp2p.io/tcp/4001/p2p/QmSoLMeWqB7YGVLJN3pNLQpmmEk35v6wYtsMGLzSr5QBU3',
-                                '/dns4/sfo-3.bootstrap.libp2p.io/tcp/4001/p2p/QmSoLPppuBtQSGwKDZT2M73ULpjvfd3aZ6ha4oFGL1KrGM',
-                                '/dns4/sgp-1.bootstrap.libp2p.io/tcp/4001/p2p/QmSoLSafTMBsPKadTEgaXctDQVcqN88CNLHXMkTNwMKPnu',
-                                '/dns4/node0.preload.ipfs.io/tcp/4001/p2p/QmZMxNdpMkewiVZLMRxaNxUeZpDUb34pWjZ1kZvsd16Zic',
-                                '/dns4/node1.preload.ipfs.io/tcp/4001/p2p/Qmbut9Ywz9YEDrz8ySBSgWyJk41Uvm2QJPhwDJzJyGFsD6',
-                            ])
-                        }
-                    }
-                } else {
-                    options = {
-                        repo: 'ipfs-' + Math.random(),
-                        config: {
-                            Addresses: {
-                                Swarm: [
-                                    // This is a public webrtc-star server
-                                    // '/dns4/star-signal.cloud.ipfs.team/tcp/443/wss/p2p-webrtc-star'
-                                    //'/ip4/127.0.0.1/tcp/13579/wss/p2p-webrtc-star'
-                                ]
-                            },
-                            // If you want to connect to the public bootstrap nodes, remove the next line
-                            Bootstrap: this.bootstraps.concat([
-                                "/dns4/arthur.bootstrap.peernet.dev/tcp/4002/wss/p2p/QmaM3FbA8amt6WGeN9Zq7zz8EmGxwdcAeHtcAUx3SoxkWF",
-                                '/dns4/ams-1.bootstrap.libp2p.io/tcp/443/wss/ipfs/QmSoLer265NRgSp2LA3dPaeykiS1J6DifTC88f5uVQKNAd',
-                                '/dns4/lon-1.bootstrap.libp2p.io/tcp/443/wss/ipfs/QmSoLMeWqB7YGVLJN3pNLQpmmEk35v6wYtsMGLzSr5QBU3',
-                                '/dns4/sfo-3.bootstrap.libp2p.io/tcp/443/wss/ipfs/QmSoLPppuBtQSGwKDZT2M73ULpjvfd3aZ6ha4oFGL1KrGM',
-                                '/dns4/sgp-1.bootstrap.libp2p.io/tcp/443/wss/ipfs/QmSoLSafTMBsPKadTEgaXctDQVcqN88CNLHXMkTNwMKPnu',
-                                '/dns4/nyc-1.bootstrap.libp2p.io/tcp/443/wss/ipfs/QmSoLueR4xBeUbY9WZ9xGUUxunbKWcrNFTDAadQJmocnWm',
-                                '/dns4/nyc-2.bootstrap.libp2p.io/tcp/443/wss/ipfs/QmSoLV4Bbm51jM9C4gDYZQ9Cy3U6aXMJDAbzgu2fzaDs64',
-                                '/dns4/node0.preload.ipfs.io/tcp/443/wss/ipfs/QmZMxNdpMkewiVZLMRxaNxUeZpDUb34pWjZ1kZvsd16Zic',
-                                '/dns4/node1.preload.ipfs.io/tcp/443/wss/ipfs/Qmbut9Ywz9YEDrz8ySBSgWyJk41Uvm2QJPhwDJzJyGFsD6'
-                            ])
-                        }
-                    }
-                }
-
-                node = await IPFS.create(options);
-                await node.id()
-                self.ipfs = node;
-            }
-
-            let waiting = true;
-
-            setTimeout(() => {
-                waiting = false
-            }, 5000);
-
-            while (waiting) {
-                let peers = await node.swarm.peers();
-                if (peers.length > 1) {
-                    waiting = false;
-                } else {
-                    await sleep(150);
-                }
-            }
-
-            // todo pin the ack temporarily.
-
-            for await (const {cid} of node.add(this.publicKey)) {
-                console.log('peernet.js: Your host public key alias is ' + cid.toString())
-            }
-
-            accept({
-                publicKey: this.publicKey,
-                privateKey: this.privateKeyArmored
-            });
         })
     }
 
-    relayPublic(host) {
+    relayPeer(peer, passthrough, until) {
+        passthrough = passthrough ? passthrough === true : false;
+        until = until ? until : 0;
 
         // this will go ahead and subscribe for data
-        // destined for a specific host and publicly relay
+        // destined for a specific peer and publicly relay
         // it's data.
-        return new Promise(async (a, r) => {
-
-            if ((typeof window) !== 'undefined') {
-                r('public relay support is not supported in the browser.');
-                return;
-            }
-            const hostData = await getHostData(this.ipfs, host);
-
-            if (relayKeyMap.has(hostData.address)) {
-                r('This host is already being relayed.');
+        return new Promise(async (accept, reject) => {
+            if (isBrowser) {
+                reject('Relay support is not supported in the browser.');
                 return;
             }
 
-            await this.ipfs.pubsub.subscribe(hostData.address, (msg) => {
-            });
+            const peerData = await this.#getPeerData(peer);
 
-            relayKeyMap.set(hostData.address, true);
-            a();
+            let originalValue = null;
+
+            if (this.#relayedPeers.has(peerData.address)) {
+                const value = this.#relayedPeers.get(peerData.address);
+
+                // only check if a pass-through already
+                // exists for this peer only if we are
+                // setting it to do so.
+                if (value && passthrough === true) {
+                    reject('This peer is already being relayed in pass-through mode.');
+                    return;
+                }
+                originalValue = value;
+            }
+
+            if (passthrough === false) {
+                // if the original value isn't false
+                this.#relayedPeers.set(peerData.address, originalValue != null ? originalValue : false);
+                accept();
+            } else {
+
+                logger.debug('Relaying peer in pass-through mode with the public key: ' + peerData.publicKey);
+
+                // we're passing an empty handler
+                // just to sink data into and let
+                // ipfs pass it off.
+                const handler = () => {};
+
+                await this.ipfs.pubsub.subscribe(peerData.address, handler);
+
+                this.#subscriptions.set(peerData.address, handler);
+                this.#relayedPeers.set(peerData.address, true);
+
+                if (until > 0) {
+                    setTimeout(async () => {
+                        try {
+                            await this.ipfs.pubsub.unsubscribe(peerData.address, handler)
+                        } catch (err) {
+                        } finally {
+                            this.#subscriptions.delete(peerData.address);
+
+                            // if the original value was anything other
+                            // than null, that means this peer is a trusted
+                            // relay peer. we just don't want to pass-through
+                            // relay anymore
+                            if (originalValue !== null) {
+                                this.#relayedPeers.set(peerData.address, false);
+                            } else {
+                                this.#relayedPeers.remove(peerData.address);
+                            }
+                        }
+                    }, until);
+                }
+
+                accept();
+            }
         });
     }
 
-    relay(isRelay) {
-        this.relayMessages = isRelay ? isRelay : false;
+    /**
+     * Tells the peer to act in pass-through mode only. This means messages
+     * will not be processed, but rather relayed through ipfs.
+     *
+     * @param passthrough
+     * @returns {Peer} returns this peer for method chaining
+     */
+    passthrough(passthrough) {
+        this.#passthrough = passthrough === true;
+        this.#handleMessages = passthrough === true ? false : this.#handleMessages;
+        this.#relayMessages = passthrough === true ? false : this.#handleMessages;
+
         return this;
     }
 
+    /**
+     * If true the peer will process messages that it has received. Setting
+     * this to true will disable pass-through mode on the peer.
+     *
+     * @param receiveMessages
+     * @returns {Peer} returns this for method chaining
+     */
+    receive(receiveMessages) {
+        this.#passthrough = receiveMessages === true ? false : this.#passthrough;
+
+        this.#handleMessages = receiveMessages ? receiveMessages : true;
+        return this;
+    }
+
+    /**
+     * When this is true, this will tell the peer that it is allowed
+     * to directly relay messages.
+     *
+     * @param relayMessages
+     * @returns {Peer} returns this for method chaining
+     */
+    relay(relayMessages) {
+        this.#passthrough = relayMessages === true ? false : this.#passthrough;
+
+        this.#relayMessages = relayMessages ? relayMessages : false;
+        return this;
+    }
+
+    /**
+     * This will go ahead and tell the peer to subscribe to messages. The peer
+     * will not receive any messages until this is called.
+     *
+     * @param handler to process messages
+     *
+     * @returns {Promise<unknown>}
+     */
     sub(handler) {
-        return new Promise(async (a, r) => {
+        return new Promise(async (accept, reject) => {
+            try {
 
-            const host = await getHostData(this.ipfs, this.publicKey);
+                this.#checkInitialized();
 
-            const node = this.ipfs;
+                const peer = await this.#getPeerData(this.#publicKey);
 
-            if (relayKeyMap.has(host.address)) {
-                r('This host is already receiving events.');
-                return;
-            }
+                const node = this.ipfs;
 
-            const receiveMsg = async (msg) => {
-                try {
+                if (this.#relayedPeers.has(peer.address)) {
+                    reject('This peer is already receiving events.');
+                    return;
+                }
 
-                    if (msgCache.has(msg)) {
-                        return;
-                    }
-
-                    const {data: decrypted} = await openpgp.decrypt({
-                        message: await openpgp.message.readArmored(msg.data.toString()),
-                        privateKeys: [this.privateKey]
-                    });
-
-                    const _data = JSON.parse(decrypted);
-
-                    const {ack, payload, key, reply} = _data;
-
-                    const {data: ackData} = ack;
-
-                    const ackHash = await Hash.of(Buffer.from(ackData));
-
+                const receiveMsg = async (msg) => {
                     try {
-
-                        // does this ack exist internally too?
-
-                        // Let's attempt to see if this ack already exists
-                        // if it does, then we won't respond to the message.
-                        const ackStream = node.cat(ackHash, {'timeout': '2s'})
-                        let data = ''
-
-                        for await (const chunk of ackStream) {
-                            // chunks of data are returned as a Buffer, convert it back to a string
-                            data += chunk.toString()
-                        }
-
-                        return;
-                    } catch (ignored) {
-                    }
-
-                    msgCache.set(msg, true);
-
-                    setTimeout(() => {
-                        try {
-                            msgCache.delete(msg);
-                        } catch(ignored) {
-                        }
-                    }, 60000 * 5)
-
-                    if (payload.hasOwnProperty('message')) {
-                        try {
-                            // push off to event loop
-                            if ((typeof handler) === 'function') {
-                                // push it off to the event loop
-                                setImmediate(() => {
-                                    handler(payload.address, payload.message)
-                                });
-                            }
-                        } catch (e) {
-                        }
-
-                        // todo implement reply
-
-                        for await (const {cid} of node.add(ackData)) {
-                            console.log('peernet.js: ack added ' + cid.toString())
-                        }
-
-                        if (_data.hasOwnProperty('relays')) {
-                            const relays = _data.relays;
-                            for (const relayData of relays) {
-                                // todo pin the ack temporarily.
-                                for await (const {cid} of node.add(relayData)) {
-                                    console.log('peernet.js: relay ack added ' + cid.toString())
-                                }
-                            }
-                        }
-
-                    } else if (payload.hasOwnProperty('relay')) {
-                        if (this.relayMessages !== true) {
-                            // ignore any relay messages.
+                        // we don't need to do anything at all
+                        if (this.#passthrough === true) {
                             return;
                         }
 
-                        const {data, host} = payload.relay;
+                        const msgData = msg.data.toString();
 
-                        const {address: topic} = await getHostData(this.ipfs, host);
-
-                        console.log('Relaying message to: ' + topic);
-
-                        const repeat = setInterval(async () => {
-                            await node.pubsub.publish(topic, data);
-                        }, 2500);
-
-                        await node.pubsub.publish(topic, data);
-
-                        try {
-                            // let's relay this until we got the ack.
-                            const ackStream = node.cat(ackHash, {'timeout': '30s'})
-                            let data = '';
-                            for await (const chunk of ackStream) {
-                                // chunks of data are returned as a Buffer, convert it back to a string
-                                data += chunk.toString()
-                            }
-
-                            if (data === ackData) {
-                                console.log('peernet.js: relay ack received ! ' + data);
-                            }
-                        } catch (ignored) {
-                            // error timeout
-                        } finally {
-                            clearTimeout(repeat);
+                        if (this.#msgCache.has(msgData)) {
+                            return;
                         }
+
+                        const decrypted = await this.#crypto.decrypt(this.#privateKeyArmored, this.#privateKeyPass, msgData);
+
+                        const _data = JSON.parse(decrypted);
+
+                        const {ack, payload, key} = _data;
+
+                        this.#msgCache.set(msgData, true);
+
+                        setTimeout(() => {
+                            try {
+                                this.#msgCache.delete(msg);
+                            } catch (ignored) {
+                            }
+                        }, 60000 * 5)
+
+                        if (payload.hasOwnProperty('message')) {
+                            // handle direct messages
+
+                            if (this.#handleMessages !== true) {
+                                return;
+                            }
+
+                            const {data: msgAck} = ack;
+
+                            const ackHash = await Hash.of(Buffer.from(msgAck));
+
+                            if (this.#checkPubAcks === true) {
+                                if (this.#ackExists !== null) {
+                                    const exists = await this.#ackExists();
+
+                                    if (exists) {
+                                        return true;
+                                    }
+                                } else {
+                                    // this should be optimized - todo
+                                    const detectedAck = await cat(node, ackHash, '5s');
+
+                                    // this should return null
+                                    if (detectedAck != null) {
+                                        return null;
+                                    }
+                                }
+                            }
+
+                            try {
+                                let replyResult = null;
+                                if ((typeof handler) === 'function') {
+                                    const result = await handler(payload.address, payload.message);
+                                    if (result != null) {
+                                        replyResult = result;
+                                    }
+                                }
+
+                                // the client is expecting a reply...
+                                if (payload.hasOwnProperty('replyId')) {
+
+                                    logger.debug('Sending reply...')
+
+                                    // let's go ahead and craft a reply.
+                                    const peerData = await this.#getPeerData(key);
+
+                                    const signedMsg = await sign(this.#privateKeyArmored, this.#privateKeyPass,
+                                        replyResult != null ? replyResult.toString() : '');
+
+                                    // can we possible return a list of peers to bootstrap from?
+
+                                    // sign the payload
+                                    const replyData = {
+                                        "payload": {
+                                            "reply": {
+                                                'message': signedMsg,
+                                                'replyId': payload['replyId']
+                                            }
+                                        },
+                                        "key": this.#publicKey
+                                    };
+
+                                    const replyEnc = await this.#crypto.encrypt(peerData.publicKey, JSON.stringify(replyData))
+
+                                    await node.pubsub.publish(peerData.address, replyEnc);
+
+                                }
+                            } catch (err) {
+                                logger.error('Failed to process message', e);
+                            }
+
+
+                            // begin message acknowledgement
+                            // Note: is this resilient as it could be ?
+                            // ideally the nodes acknowledging the message
+                            // should
+                            const ackCid = await add(node, msgAck);
+
+                            try {
+                                await pin(node, ackCid);
+                            } catch (ignored){}
+
+                            if (this.#storeAck !== null) {
+                                try {
+                                    this.#storeAck(ackCid);
+                                } catch (err) {
+                                    logger.error(err);
+                                }
+                            }
+
+                            logger.debug('Acknowledgement added: ' + ackCid);
+
+                            if (_data.hasOwnProperty('relayAck')) {
+                                const relayAcks = _data.relayAck;
+                                for (const relayAck of relayAcks) {
+                                    const relayAckCid = await add(node, relayAck);
+                                    try {
+                                        await pin(node, relayAckCid);
+                                    } catch (ignored){}
+                                    logger.debug('Relay acknowledgement added: ' + relayAckCid);
+                                }
+                            }
+
+                        } else if (payload.hasOwnProperty('relay')) {
+                            // Handle Direct Relay Messages
+
+                            if (this.#relayMessages !== true) {
+                                return;
+                            }
+
+                            const {data: relayMsg, peer: relayPeer, reply} = payload.relay;
+
+                            const {address: topic} = await this.#getPeerData(relayPeer);
+
+                            // only trusted peers can be here.
+                            if (this.#relayedPeers.has(topic)) {
+
+                                logger.debug('Relaying direct message to: ' + topic);
+
+                                // does this relay have a reply route??
+                                if (reply === true) {
+                                    logger.debug('Reply wanted, attempting temporary pass-through relay...')
+                                    try {
+                                        await this.relayPeer(key, true, 1000 * 120);
+                                    } catch (ignored) {
+                                    }
+                                }
+
+                                // Begin relaying!
+                                const repeat = setInterval(async () => {
+                                    await node.pubsub.publish(topic, relayMsg);
+                                }, 2500);
+
+                                await node.pubsub.publish(topic, relayMsg);
+
+                                try {
+
+                                    const {data: relayAckData} = ack;
+
+                                    const relayAckHash = await Hash.of(Buffer.from(relayAckData));
+
+                                    // let's relay this until we got the ack.
+                                    const detectedAckData = await cat(node, relayAckHash, '60s');
+
+                                    if (detectedAckData === relayAckData) {
+                                        logger.debug('Relay ack received! ' + relayAckHash)
+                                    }
+                                } catch (err) {
+                                    logger.error(err);
+                                } finally {
+                                    clearTimeout(repeat);
+                                }
+                            }
+                        } else if (payload.hasOwnProperty('reply')) {
+                            // handle direct replies
+
+                            const {message, replyId} = payload.reply;
+                            const replyPublicKey = this.#replyHosts.get(replyId);
+                            this.#replyHosts.delete(replyId);
+
+                            // was the message received by the peer we sent it to?
+                            const verified = await verify(replyPublicKey, message);
+
+                            if (verified != null) {
+                                if (this.#replyCallbacks.has(replyId)) {
+                                    const replyCb = this.#replyCallbacks.get(replyId);
+                                    this.#replyCallbacks.delete(replyId);
+
+                                    try {
+                                        replyCb(null, verified);
+                                    } catch (err) {
+                                    }
+                                }
+                            } else {
+                                logger.error('Invalid reply signature received: ' + message);
+                            }
+                        }
+                        // end processing
+                    } catch (err) {
+                        logger.error(err);
                     }
-                    // end processing
-                } catch (e) {
-                    console.log('peernet.js: invalid payload');
-                    console.log(e);
-                }
-            };
+                };
 
-            const hostData = await getHostData(node, this.publicKey);
+                const peerData = await this.#getPeerData(this.#publicKey);
 
-            await node.pubsub.subscribe(hostData.address, receiveMsg);
+                await node.pubsub.subscribe(peerData.address, receiveMsg);
 
-            relayKeyMap.set(host.address, true);
-            a();
+                logger.debug('Subscribing to messages for the topic: ' + peerData.address);
+
+                this.#subscriptions.set(peer.address, receiveMsg);
+                this.#relayedPeers.set(peer.address, true);
+                accept();
+            } catch (err) {
+                reject(err);
+            }
         });
     }
 
-    pub(host, address, msg) {
-        return this.init().then(async () => {
+    /**
+     * When this is called, the peer will encrypt a payload including the address
+     * and the message. After the payload is encrypted using the destination peers
+     * public key, the data will then be sent over IPFS pubsub. The peer will
+     * attempt to send the payload directly and it will also send a direct relay
+     * message to any configured relays.
+     *
+     * @param peer the peer you wish to send the message to
+     * @param address an internal address for the peer to identify messages with
+     * @param msg the message you wish to send
+     * @param callback a callback you wish to receive replies on
+     * @returns {Promise<unknown>} a promise that will complete when a message acknowledgement is received.
+     */
+    pub(peer, address, msg, callback) {
+        return new Promise(async (finished, failed) => {
+            try {
+                this.#checkInitialized();
 
-            const node = this.ipfs;
+                // retrieve the peer data for the
+                // peer we wish to send a message to.
+                const node = this.ipfs,
+                    peerData = await this.#getPeerData(peer);
 
-            const hostData = await getHostData(node, host);
+                // generate message acknowledgement data
+                const msgAck = randomData();
 
-            const msgAck = generateRandomData();
+                // generate message acknowledgement data for
+                // each relay.
+                const relayAcks = this.#relays.map(() => {
+                    return randomData()
+                });
 
-            const relayAcks = this.relays.map(() => {
-                return generateRandomData()
-            });
+                let replyId = null;
 
-            const ack = {
-                "data": msgAck
-            };
+                // generate a reply id and store the peer
+                // and the function we want to trigger
+                // as a callback.
+                if ((typeof callback) === 'function') {
+                    replyId = uuidv4();
+                    this.#replyCallbacks.set(replyId, callback);
+                    this.#replyHosts.set(replyId, peerData.publicKey);
+                }
 
-            const pubData = {
-                "payload": {
-                    "address": address, // the internal address
-                    "message": msg
-                },
-                "ack": ack,
-                "key": this.publicKey,
-                "relays": relayAcks // this is where the host needs to send an ack back
-            };
+                // create the payload that will be
+                // sent to the peer.
+                const jsonData = {
+                    "payload": {
+                        "address": address,
+                        "message": msg,
+                        "replyId": replyId
+                    },
+                    "ack": {
+                        "data": msgAck
+                    },
+                    "key": this.#publicKey,
+                    "relayAck": relayAcks // this is where the peer needs to send an ack back
+                };
 
-            const {data: encrypted} = await openpgp.encrypt({
-                message: openpgp.message.fromText(JSON.stringify(pubData)),
-                publicKeys: (await openpgp.key.readArmored(hostData.publicKey + '\n')).keys
-            });
+                // encrypt the data
+                const encrypted = await this.#crypto.encrypt(peerData.publicKey, JSON.stringify(jsonData));
 
-            const topic = hostData.address;
+                const data = Buffer.from(encrypted);
 
-            return new Promise(async (finished, failed) => {
-                try {
+                const peerAddress = peerData.address;
 
-                    const hash = await Hash.of(Buffer.from(msgAck));
-                    const data = Buffer.from(encrypted);
+                // publish the data immediately
+                await node.pubsub.publish(peerAddress, data);
 
-                    await node.pubsub.publish(topic, data);
+                const repeat = setInterval(async () => {
+                    await node.pubsub.publish(peerAddress, data);
+                }, 2500);
 
-                    for (const relayHost of this.relays) {
-                        setTimeout(async () => {
-                            const idx = this.relays.indexOf(relayHost);
-                            const relayAckData = relayAcks[idx];
-                            const relayHostData = await getHostData(this.ipfs, relayHost);
-                            const relayPubKey = relayHostData.publicKey;
+                const timeouts = [];
 
-                            // TODO - should we use workers?
-                            const {data: encryptedRelay} = await openpgp.encrypt({
-                                message: openpgp.message.fromText(JSON.stringify({
-                                    'payload': {
-                                        'relay': {
-                                            'data': encrypted,
-                                            'host': hostData.publicKey
-                                        }
-                                    },
-                                    'key': this.publicKey,
-                                    'ack': {
-                                        'data': relayAckData
-                                    }
-                                })),
-                                publicKeys: (await openpgp.key.readArmored(relayPubKey)).keys
-                            });
+                // Publish the message to the relay peers
+                for (const relayPeer of this.#relays) {
+                    const idx = this.#relays.indexOf(relayPeer);
+                    const relayAckData = relayAcks[idx];
+                    const relayPeerData = await this.#getPeerData(relayPeer);
+                    const relayPubKey = relayPeerData.publicKey;
 
-                            await node.pubsub.publish(relayHostData.address, encryptedRelay);
-                        }, 150);
-                    }
+                    const relayMsg = JSON.stringify({
+                        'payload': {
+                            'relay': {
+                                'data': encrypted,
+                                'peer': peerData.publicKey,
+                                'reply': replyId != null // tell the relay to attempt to relay replies
+                            }
+                        },
+                        'key': this.#publicKey,
+                        'ack': {
+                            'data': relayAckData
+                        }
+                    });
 
-                    const repeat = setInterval(async () => {
+                    const encryptedRelay = await this.#crypto.encrypt(relayPubKey, relayMsg);
 
-                        await node.pubsub.publish(topic, data);
+                    await node.pubsub.publish(relayPeerData.address, encryptedRelay);
+
+                    const relayTimeout = setInterval(async () => {
+                        await node.pubsub.publish(relayPeerData.address, encryptedRelay);
                     }, 5000);
 
-                    // every x amount of seconds, we will go ahead
-                    // and publish this data until we receive an ack.
+                    timeouts.push(relayTimeout);
+                }
 
-                    const tmp = {};
-                    // if no reply, remove subscribe and timeout
-                    const timeout = setTimeout(() => {
-                        tmp['failed'] = true;
-                        failed('Timeout hit while waiting for a reply or acknowledgement.');
-                    }, 65000);
+                // every x amount of seconds, we will go ahead
+                // and publish this data until we receive an ack.
 
-                    try {
+                const tmp = {};
+                // if no reply, remove subscribe and timeout
+                const timeout = setTimeout(() => {
+                    tmp['timeout'] = true;
+                    failed('Timeout hit while waiting for a reply or acknowledgement.');
+                }, 65000);
 
-                        const stream = node.cat(hash, {'timeout': '60s'});
+                try {
 
-                        let data = ''
+                    // does the acknowledgement exist?
+                    const ackHash = await Hash.of(Buffer.from(msgAck));
+                    const ackData = await cat(node, ackHash, '60s');
 
-                        for await (const chunk of stream) {
-                            // chunks of data are returned as a Buffer, convert it back to a string
-                            data += chunk.toString()
-                        }
+                    clearTimeout(repeat);
+                    clearTimeout(timeout);
 
-                        clearTimeout(repeat);
-                        clearTimeout(timeout);
-
-                        if (data === msgAck) {
-                            finished();
-                        } else {
-                            failed('Invalid ack data 0.o which is normally impossible.');
-                        }
-                    } catch (e) {
-                        failed(e);
+                    for (const t of timeouts) {
+                        clearTimeout(t);
                     }
 
-                } catch (e) {
-                    failed(e);
+                    // timeout has been hit. so we can do nothing.
+                    if (tmp.hasOwnProperty('timeout')) {
+                        return;
+                    }
+
+                    // since the data was added to IPFS, we know the peer
+                    // received the data.
+                    if (ackData === msgAck) {
+                        finished();
+                    } else {
+                        // todo: a better error
+                        failed('Invalid ack data 0.o which is normally impossible.');
+                    }
+                } catch (err) {
+                    failed(err);
                 }
-            });
+
+            } catch (err) {
+                failed(err);
+            }
         });
     }
 }
 
-module.exports = PeerNet;
+module.exports = Peer;

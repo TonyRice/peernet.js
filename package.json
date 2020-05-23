@@ -2,23 +2,38 @@
   "name": "peernet-js",
   "version": "0.0.4",
   "description": "peernet.js provides a simple message acknowledgement layer built using OpenPGP and IPFS pubsub.",
-  "main": "index.js",
+  "main": "src/index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "webpack --config webpack.config.js"
   },
   "author": "Tony Rice <tony@tonyrice.me>",
   "license": "MIT",
   "dependencies": {
     "crypto-js": "^4.0.0",
+    "esm": "^3.2.25",
     "ipfs": "^0.44.0",
     "ipfs-only-hash": "^2.0.1",
     "openpgp": "^4.10.4",
-    "threads": "^1.4.1",
     "winston": "^3.2.1",
     "winston-transport-browserconsole": "^1.0.5"
   },
   "browser": {
     "openpgp": "openpgp/dist/openpgp.min.js",
     "ipfs": "ipfs/dist/index.min.js"
-  }
+  },
+  "devDependencies": {
+    "@babel/core": "^7.9.6",
+    "@babel/plugin-proposal-class-properties": "^7.8.3",
+    "@babel/plugin-proposal-private-methods": "^7.8.3",
+    "@babel/plugin-transform-runtime": "^7.9.6",
+    "@babel/preset-env": "^7.9.6",
+    "babel-loader": "^8.1.0",
+    "babel-minify-webpack-plugin": "^0.3.1",
+    "babel-preset-env": "^1.7.0",
+    "uglifyjs-webpack-plugin": "^2.2.0",
+    "webpack": "^4.43.0",
+    "webpack-cli": "^3.3.11"
+  },
+  "module": "src/esm.js"
 }

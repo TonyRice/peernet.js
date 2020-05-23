@@ -1,25 +1,27 @@
-const {spawn, Worker} = require("threads");
-const IPFS = require('ipfs');
-const Hash = require('ipfs-only-hash');
-const sha1 = require('crypto-js/sha1');
-const Base64 = require('crypto-js/enc-base64');
+import IPFS from "ipfs";
+import Hash from 'ipfs-only-hash';
+import sha1 from 'crypto-js/sha1.js';
+import Base64 from 'crypto-js/enc-base64.js';
+import ipfsClient from 'ipfs-http-client';
+import {generateKeyPair, sign, encrypt, decrypt, verify} from './util/crypto.js';
+import {sleep, uuidv4, randomData} from './util/index.js';
+import {add, cat, pin, connect, DEFAULT_BOOTSTRAP, DEFAULT_BOOTSTRAP_BROWSER} from './util/ipfs.js';
+import logger from './util/logger.js';
 
-const {generateKeyPair, sign, verify} = require('./lib/util/crypto');
-const {sleep, uuidv4, randomData} = require('./lib/util');
-const {add, cat, pin, unpin, connect, DEFAULT_BOOTSTRAP, DEFAULT_BOOTSTRAP_BROWSER} = require('./lib/util/ipfs');
-const logger = require('./lib/util/logger')
+const PEERNET_BOOTSTRAP = [
+    "/dns4/arthur.bootstrap.peernet.dev/tcp/4001/p2p/QmaM3FbA8amt6WGeN9Zq7zz8EmGxwdcAeHtcAUx3SoxkWF",
+    "/dns4/john.bootstrap.peernet.dev/tcp/4001/p2p/QmcSJKAznvnnVKyWbRhzJDTqLnp1LuNXS8ch9SwcR713bX",
+    "/ip6/2607:9000:0:19:216:3cff:fe80:9c47/tcp/4001/p2p/QmaM3FbA8amt6WGeN9Zq7zz8EmGxwdcAeHtcAUx3SoxkWF",
+    "/ip6/2607:9000:0:28:216:3cff:fe80:9c47/tcp/4001/p2p/QmaM3FbA8amt6WGeN9Zq7zz8EmGxwdcAeHtcAUx3SoxkWF"
+];
 
-const {PEERNET_BOOTSTRAP, PEERNET_BOOTSTRAP_BROWSER} = require('./lib/util/peernet');
-
-const isBrowser = (typeof window) !== 'undefined';
-
-if (!isBrowser) {
-    ipfsClient = require('ipfs-http-client');
-}
+const PEERNET_BOOTSTRAP_BROWSER = [
+    "/dns4/arthur.bootstrap.peernet.dev/tcp/4002/wss/p2p/QmaM3FbA8amt6WGeN9Zq7zz8EmGxwdcAeHtcAUx3SoxkWF",
+    "/dns4/john.bootstrap.peernet.dev/tcp/4002/wss/p2p/QmcSJKAznvnnVKyWbRhzJDTqLnp1LuNXS8ch9SwcR713bX"
+];
 
 class Peer {
     #started = false;
-    #crypto = null;
 
     #bootstraps;
     #proxyMode;
@@ -76,9 +78,8 @@ class Peer {
                 try {
                     logger.debug('Attempting to re-connect to IPFS node: ' + addr);
                     await connect(this.ipfs, addr);
-                    logger.debug('Connected to IPFS node: ' + addr);
                 } catch (err) {
-                    console.log(err);
+                    logger.error(err)
                 }
             }
         }
@@ -143,7 +144,7 @@ class Peer {
 
         this.#bootstraps = config.bootstrap ? config.bootstrap : [];
 
-        if (isBrowser) {
+        if ((typeof window) === 'object') {
             this.#bootstraps = this.#bootstraps.concat(PEERNET_BOOTSTRAP_BROWSER);
         } else {
             this.#bootstraps = this.#bootstraps.concat(PEERNET_BOOTSTRAP);
@@ -204,7 +205,6 @@ class Peer {
             }
         } finally {
             this.ipfs = null;
-            this.#crypto = null;
             this.#started = false;
         }
     }
@@ -218,13 +218,9 @@ class Peer {
         }
 
         return new Promise(async (accept, reject) => {
-
             logger.info('Initializing...');
 
             try {
-
-                // this will help us handle crypto operations.
-                this.#crypto = await spawn(new Worker("./lib/workers/crypto"));
 
                 if (this.#privateKey != null) {
                     this.#privateKeyArmored = this.#privateKey;
@@ -239,7 +235,6 @@ class Peer {
                     const {privateKeyArmored, publicKeyArmored} = await generateKeyPair(uuidv4(), 'web-client@peernet.dev', this.#privateKeyPass)
 
                     this.#privateKeyArmored = privateKeyArmored;
-
                     this.#publicKey = publicKeyArmored;
                 }
 
@@ -255,7 +250,7 @@ class Peer {
                     let options;
 
                     // The browser uses a different set of bootstrap nodes.
-                    if (!isBrowser) {
+                    if ((typeof window) === 'undefined') {
                         options = {
                             repo: this.#config.repo ? this.#config.repo : undefined,
                             config: {
@@ -357,7 +352,7 @@ class Peer {
         // destined for a specific peer and publicly relay
         // it's data.
         return new Promise(async (accept, reject) => {
-            if (isBrowser) {
+            if ((typeof window) === 'object') {
                 reject('Relay support is not supported in the browser.');
                 return;
             }
@@ -472,7 +467,7 @@ class Peer {
      *
      * @param handler to process messages
      *
-     * @returns {Promise<unknown>}
+     * @returns {Promise<>}
      */
     sub(handler) {
         return new Promise(async (accept, reject) => {
@@ -502,7 +497,7 @@ class Peer {
                             return;
                         }
 
-                        const decrypted = await this.#crypto.decrypt(this.#privateKeyArmored, this.#privateKeyPass, msgData);
+                        const decrypted = await decrypt(this.#privateKeyArmored, this.#privateKeyPass, msgData);
 
                         const _data = JSON.parse(decrypted);
 
@@ -579,7 +574,7 @@ class Peer {
                                         "key": this.#publicKey
                                     };
 
-                                    const replyEnc = await this.#crypto.encrypt(peerData.publicKey, JSON.stringify(replyData))
+                                    const replyEnc = await encrypt(peerData.publicKey, JSON.stringify(replyData))
 
                                     await node.pubsub.publish(peerData.address, replyEnc);
 
@@ -587,7 +582,6 @@ class Peer {
                             } catch (err) {
                                 logger.error('Failed to process message', e);
                             }
-
 
                             // begin message acknowledgement
                             // Note: is this resilient as it could be ?
@@ -726,12 +720,16 @@ class Peer {
      * @param address an internal address for the peer to identify messages with
      * @param msg the message you wish to send
      * @param callback a callback you wish to receive replies on
-     * @returns {Promise<unknown>} a promise that will complete when a message acknowledgement is received.
+     * @returns {Promise<>} a promise that will complete when a message acknowledgement is received.
      */
-    pub(peer, address, msg, callback) {
+    pub(peer, address, msg, timeout, callback) {
+        timeout = ((typeof timeout) === 'string') ? timeout : '60s';
+        callback = ((typeof callback) === 'function') ? callback : ((typeof timeout) === 'function') ? timeout : null;
+
         return new Promise(async (finished, failed) => {
             try {
                 this.#checkInitialized();
+
 
                 // retrieve the peer data for the
                 // peer we wish to send a message to.
@@ -774,7 +772,7 @@ class Peer {
                 };
 
                 // encrypt the data
-                const encrypted = await this.#crypto.encrypt(peerData.publicKey, JSON.stringify(jsonData));
+                const encrypted = await encrypt(peerData.publicKey, JSON.stringify(jsonData));
 
                 const data = Buffer.from(encrypted);
 
@@ -810,7 +808,7 @@ class Peer {
                         }
                     });
 
-                    const encryptedRelay = await this.#crypto.encrypt(relayPubKey, relayMsg);
+                    const encryptedRelay = await encrypt(relayPubKey, relayMsg);
 
                     await node.pubsub.publish(relayPeerData.address, encryptedRelay);
 
@@ -821,21 +819,11 @@ class Peer {
                     timeouts.push(relayTimeout);
                 }
 
-                // every x amount of seconds, we will go ahead
-                // and publish this data until we receive an ack.
-
-                const tmp = {};
-                // if no reply, remove subscribe and timeout
-                const timeout = setTimeout(() => {
-                    tmp['timeout'] = true;
-                    failed('Timeout hit while waiting for a reply or acknowledgement.');
-                }, 65000);
-
                 try {
 
                     // does the acknowledgement exist?
                     const ackHash = await Hash.of(Buffer.from(msgAck));
-                    const ackData = await cat(node, ackHash, '60s');
+                    const ackData = await cat(node, ackHash, timeout);
 
                     clearTimeout(repeat);
                     clearTimeout(timeout);
@@ -844,23 +832,17 @@ class Peer {
                         clearTimeout(t);
                     }
 
-                    // timeout has been hit. so we can do nothing.
-                    if (tmp.hasOwnProperty('timeout')) {
-                        return;
-                    }
-
                     // since the data was added to IPFS, we know the peer
                     // received the data.
                     if (ackData === msgAck) {
                         finished();
                     } else {
-                        // todo: a better error
+                        // todo a better error
                         failed('Invalid ack data 0.o which is normally impossible.');
                     }
                 } catch (err) {
-                    failed(err);
+                    failed('Timeout reached while waiting for a reply or acknowledgement.');
                 }
-
             } catch (err) {
                 failed(err);
             }
@@ -868,4 +850,5 @@ class Peer {
     }
 }
 
-module.exports = Peer;
+export default Peer
+

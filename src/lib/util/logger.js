@@ -1,26 +1,18 @@
-const winston = require('winston');
+import winston from 'winston';
 const { combine, timestamp, label, printf } = winston.format;
 
-const BrowserConsole = require('winston-transport-browserconsole');
+import BrowserConsole from "winston-transport-browserconsole";
 
 const formatter = combine(
-    label({ label: 'peernet.js' }),
+    label({ label: 'peer.js' }),
     timestamp(),
     printf(({ level, message, label, timestamp }) => {
         return `[${label}] ${timestamp} ${level}: ${message}`;
     })
 )
-
-const isBrowser = (typeof window) !== 'undefined';
-
 let transports = [];
 
-if (!isBrowser) {
-    transports.concat([
-        new winston.transports.File({ filename: 'error.log', level: 'error' }),
-        new winston.transports.File({ filename: 'combined.log' })
-    ])
-} else {
+if ((typeof window) !== 'undefined') {
     transports.concat([
         new BrowserConsole(
             {
@@ -37,10 +29,10 @@ const logger = winston.createLogger({
     transports: transports
 });
 
-if (process.env.NODE_ENV !== 'production' && !isBrowser) {
+if (process.env.NODE_ENV !== 'production') {
     logger.add(new winston.transports.Console({
         format: formatter,
     }));
 }
 
-module.exports = logger;
+export default logger;

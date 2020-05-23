@@ -76,10 +76,8 @@ class Peer {
         for (const addr of this.#bootstraps) {
             if (peerAddrs.indexOf(addr) === -1) {
                 try {
-                    logger.debug('Attempting to re-connect to IPFS node: ' + addr);
                     await connect(this.ipfs, addr);
                 } catch (err) {
-                    logger.error(err)
                 }
             }
         }

@@ -1,4 +1,4 @@
-const DEFAULT_BOOTSTRAP = [
+export const DEFAULT_BOOTSTRAP = [
     "/dns4/arthur.bootstrap.peernet.dev/tcp/4001/p2p/QmaM3FbA8amt6WGeN9Zq7zz8EmGxwdcAeHtcAUx3SoxkWF",
     "/dns4/john.bootstrap.peernet.dev/tcp/4001/p2p/QmcSJKAznvnnVKyWbRhzJDTqLnp1LuNXS8ch9SwcR713bX",
     "/ip6/2607:9000:0:19:216:3cff:fe80:9c47/tcp/4001/p2p/QmaM3FbA8amt6WGeN9Zq7zz8EmGxwdcAeHtcAUx3SoxkWF",
@@ -13,7 +13,7 @@ const DEFAULT_BOOTSTRAP = [
     '/dns4/node1.preload.ipfs.io/tcp/4001/p2p/Qmbut9Ywz9YEDrz8ySBSgWyJk41Uvm2QJPhwDJzJyGFsD6',
 ];
 
-const DEFAULT_BOOTSTRAP_BROWSER = [
+export const DEFAULT_BOOTSTRAP_BROWSER = [
     "/dns4/arthur.bootstrap.peernet.dev/tcp/4002/wss/p2p/QmaM3FbA8amt6WGeN9Zq7zz8EmGxwdcAeHtcAUx3SoxkWF",
     "/dns4/john.bootstrap.peernet.dev/tcp/4002/wss/p2p/QmcSJKAznvnnVKyWbRhzJDTqLnp1LuNXS8ch9SwcR713bX",
     '/dns4/ams-1.bootstrap.libp2p.io/tcp/443/wss/ipfs/QmSoLer265NRgSp2LA3dPaeykiS1J6DifTC88f5uVQKNAd',
@@ -26,7 +26,7 @@ const DEFAULT_BOOTSTRAP_BROWSER = [
     '/dns4/node1.preload.ipfs.io/tcp/443/wss/ipfs/Qmbut9Ywz9YEDrz8ySBSgWyJk41Uvm2QJPhwDJzJyGFsD6'
 ];
 
-async function cat(node , hash, timeout) {
+export async function cat(node , hash, timeout) {
     timeout = timeout ? timeout : '60s';
 
     try {
@@ -37,12 +37,11 @@ async function cat(node , hash, timeout) {
         }
         return data;
     } catch (err) {
-        console.error(err)
     }
     return null;
 }
 
-async function add(node, data) {
+export async function add(node, data) {
     try {
         for await (const {cid} of node.add(data)) {
             if(cid) {
@@ -55,27 +54,17 @@ async function add(node, data) {
     return null;
 }
 
-async function pin(node, cid) {
+export async function pin(node, cid) {
     return await node.pin.add(cid);
 }
 
-async function unpin(node, cid) {
+export async function unpin(node, cid) {
     return await node.pin.rm(cid);
 }
 
-async function connect(node, host) {
+export async function connect(node, host) {
     // todo check if already connected
     const peers = await node.swarm.peers();
 
     await node.swarm.connect(host);
-}
-
-module.exports = {
-    cat,
-    add,
-    pin,
-    unpin,
-    connect,
-    DEFAULT_BOOTSTRAP,
-    DEFAULT_BOOTSTRAP_BROWSER
 }

@@ -1,16 +1,16 @@
-const openpgp = require('openpgp');
+import * as openpgp from 'openpgp';
 
 const privateKeyCache = new Map();
 
-async function generateKeyPair(name, email, password) {
-    return {privateKeyArmored, publicKeyArmored, revocationCertificate} = await openpgp.generateKey({
+export async function generateKeyPair(name, email, password) {
+    return await openpgp.generateKey({
         userIds: [{name: name, email: email}], // you can pass multiple user IDs
         curve: 'ed25519',
         passphrase: password
-    });
+    })
 }
 
-async function encrypt(publicKey, message) {
+export async function encrypt(publicKey, message) {
     const {data: encrypted} = await openpgp.encrypt({
         message: openpgp.message.fromText(message),
         publicKeys: (await openpgp.key.readArmored(publicKey)).keys
@@ -19,7 +19,7 @@ async function encrypt(publicKey, message) {
     return encrypted;
 }
 
-async function decrypt(privateKeyText, password, message) {
+export async function decrypt(privateKeyText, password, message) {
     const {data: decrypted} = await openpgp.decrypt({
         message: await openpgp.message.readArmored(message),
         privateKeys: [await readPrivateKey(privateKeyText, password)]
@@ -28,7 +28,7 @@ async function decrypt(privateKeyText, password, message) {
     return decrypted;
 }
 
-async function readPrivateKey(privateKeyText, password) {
+export async function readPrivateKey(privateKeyText, password) {
     if (privateKeyCache.has(privateKeyText)) {
         return privateKeyCache.get(privateKeyText);
     }
@@ -41,7 +41,7 @@ async function readPrivateKey(privateKeyText, password) {
     return privateKey;
 }
 
-async function sign(privateKeyText, password, message) {
+export async function sign(privateKeyText, password, message) {
     const { data: signed } = await openpgp.sign({
         message: openpgp.cleartext.fromText(message),
         privateKeys: [await readPrivateKey(privateKeyText, password)]
@@ -50,7 +50,7 @@ async function sign(privateKeyText, password, message) {
     return signed;
 }
 
-async function verify(publicKey, message) {
+export async function verify(publicKey, message) {
     const verified = await openpgp.verify({
         message: await openpgp.cleartext.readArmored(message),
         publicKeys: (await openpgp.key.readArmored(publicKey)).keys
@@ -62,12 +62,4 @@ async function verify(publicKey, message) {
     }
 
     return null;
-}
-
-module.exports = {
-    generateKeyPair,
-    encrypt,
-    decrypt,
-    sign,
-    verify
 }

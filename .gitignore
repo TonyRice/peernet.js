@@ -8,4 +8,6 @@ public
 *.log
 *.save
 .*.swp
+.idea
+.iml
 

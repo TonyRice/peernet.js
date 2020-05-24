@@ -21,59 +21,59 @@ const PEERNET_BOOTSTRAP_BROWSER = [
 ];
 
 class Peer {
-    #started = false;
+    _started = false;
 
-    #bootstraps;
-    #proxyMode;
-    #proxyHost;
+    _bootstraps;
+    _proxyMode;
+    _proxyHost;
 
-    #publicKey;
-    #privateKey;
-    #privateKeyArmored;
-    #privateKeyPass;
+    _publicKey;
+    _privateKey;
+    _privateKeyArmored;
+    _privateKeyPass;
 
-    #relayMessages;
-    #handleMessages;
+    _relayMessages;
+    _handleMessages;
 
-    #passthrough;
-    #passthroughPeers;
+    _passthrough;
+    _passthroughPeers;
 
-    #checkPubAcks;
-    #ackExists;
-    #storeAck;
+    _checkPubAcks;
+    _ackExists;
+    _storeAck;
 
-    #relays;
-    #relayPeers;
-    #relayedPeers = new Map();
+    _relays;
+    _relayPeers;
+    _relayedPeers = new Map();
 
-    #subscriptions = new Map();
+    _subscriptions = new Map();
 
-    #replyHosts = new Map();
-    #msgCache = new Map();
+    _replyHosts = new Map();
+    _msgCache = new Map();
 
-    #replyCallbacks = new Map();
-    #peerPubKeyCache = new Map();
+    _replyCallbacks = new Map();
+    _peerPubKeyCache = new Map();
 
-    #config;
+    _config;
 
-    #bootstrapTimer = -1;
+    _bootstrapTimer = -1;
 
     // Note: private methods are declared as variables for
     // NodeJS 12.x.x support
-    #checkInitialized = () => {
-        if (this.ipfs !== null && this.#started === true) {
+    _checkInitialized = () => {
+        if (this.ipfs !== null && this._started === true) {
             return;
         }
 
         throw "Not initialized!";
     }
 
-    #reconnectBootstraps = async () => {
+    _reconnectBootstraps = async () => {
         const peers = await this.ipfs.swarm.peers();
         const peerAddrs = peers.map((peer) => {
             return peer.addr.toString();
         });
-        for (const addr of this.#bootstraps) {
+        for (const addr of this._bootstraps) {
             if (peerAddrs.indexOf(addr) === -1) {
                 try {
                     await connect(this.ipfs, addr);
@@ -83,14 +83,14 @@ class Peer {
         }
     }
 
-    #getPeerData = (async (peer) => {
-        this.#checkInitialized();
+    _getPeerData = (async (peer) => {
+        this._checkInitialized();
 
         const ipfs = this.ipfs;
 
         // todo attempt to validate.
-        if (this.#peerPubKeyCache.has(peer)) {
-            return Promise.resolve(this.#peerPubKeyCache.get(peer));
+        if (this._peerPubKeyCache.has(peer)) {
+            return Promise.resolve(this._peerPubKeyCache.get(peer));
         }
 
         let peerPubKey;
@@ -130,7 +130,7 @@ class Peer {
             'address': Base64.stringify(address)
         }
 
-        this.#peerPubKeyCache.set(peer, data);
+        this._peerPubKeyCache.set(peer, data);
 
         return Promise.resolve(data);
     });
@@ -140,48 +140,48 @@ class Peer {
             relays: []
         }
 
-        this.#bootstraps = config.bootstrap ? config.bootstrap : [];
+        this._bootstraps = config.bootstrap ? config.bootstrap : [];
 
         if ((typeof window) === 'object') {
-            this.#bootstraps = this.#bootstraps.concat(PEERNET_BOOTSTRAP_BROWSER);
+            this._bootstraps = this._bootstraps.concat(PEERNET_BOOTSTRAP_BROWSER);
         } else {
-            this.#bootstraps = this.#bootstraps.concat(PEERNET_BOOTSTRAP);
+            this._bootstraps = this._bootstraps.concat(PEERNET_BOOTSTRAP);
         }
 
-        this.#proxyMode = config.proxy ? config.proxy === true : false;
-        this.#proxyHost = config.proxyHost ? config.proxyHost : 'http://localhost:5001';
-        this.#publicKey = config.publicKey ? config.publicKey : null;
-        this.#privateKey = config.privateKey ? config.privateKey : null;
-        this.#privateKeyPass = config.privateKeyPass ? config.privateKeyPass : null;
+        this._proxyMode = config.proxy ? config.proxy === true : false;
+        this._proxyHost = config.proxyHost ? config.proxyHost : 'http://localhost:5001';
+        this._publicKey = config.publicKey ? config.publicKey : null;
+        this._privateKey = config.privateKey ? config.privateKey : null;
+        this._privateKeyPass = config.privateKeyPass ? config.privateKeyPass : null;
 
         // this will tell the server to act as a passthrough relay for it's own messages
-        this.#passthrough = config.passthrough ? config.passthrough === true : false;
+        this._passthrough = config.passthrough ? config.passthrough === true : false;
 
         // these are hosts we wish to handle data for in a passthrough manner.
-        this.#passthroughPeers = config.passthroughPeers ? config.passthroughPeers : [];
+        this._passthroughPeers = config.passthroughPeers ? config.passthroughPeers : [];
 
         // this tells the node that it is able to relay messages directly
-        this.#relayMessages = config.relay ? config.relay === true && this.#passthrough === false : false;
+        this._relayMessages = config.relay ? config.relay === true && this._passthrough === false : false;
         // trusted hosts are hosts that we allow messages to be relayed
         // to if we are in relay mode.
-        this.#relayPeers = config.relayPeers ? config.relayPeers : [];
+        this._relayPeers = config.relayPeers ? config.relayPeers : [];
 
         // this tells the node that it will receive and process messages directly.
-        this.#handleMessages = config.receive ? config.receive === true && this.#passthrough === false : false;
+        this._handleMessages = config.receive ? config.receive === true && this._passthrough === false : false;
 
         // If a peer is considered a single peer, it won't check for acks
-        this.#checkPubAcks = config.standalone ? config.standalone !== true : true;
+        this._checkPubAcks = config.standalone ? config.standalone !== true : true;
 
-        this.#ackExists = (typeof config.ackExists) === 'function' ? config.ackExists : null;
-        this.#storeAck = (typeof config.storeAck) === 'function' ? config.storeAck : null;
+        this._ackExists = (typeof config.ackExists) === 'function' ? config.ackExists : null;
+        this._storeAck = (typeof config.storeAck) === 'function' ? config.storeAck : null;
 
         // this is where we will send any relay data to.
         // these nodes help ensure deliverability of our messages.
-        this.#relays = config.relays ? config.relays : [];
+        this._relays = config.relays ? config.relays : [];
 
-        this.#config = config ? config : {};
+        this._config = config ? config : {};
 
-        this.#bootstrapTimer = -1;
+        this._bootstrapTimer = -1;
 
     }
 
@@ -195,23 +195,23 @@ class Peer {
         }
 
         try {
-            for (const entry of this.#subscriptions.entries()) {
+            for (const entry of this._subscriptions.entries()) {
                 await this.ipfs.pubsub.unsubscribe(entry[0], entry[1]);
             }
-            if (this.#proxyMode === false) {
+            if (this._proxyMode === false) {
                 await this.ipfs.stop();
             }
         } finally {
             this.ipfs = null;
-            this.#started = false;
+            this._started = false;
         }
     }
 
     init() {
-        if (this.ipfs != null && this.#started) {
+        if (this.ipfs != null && this._started) {
             return Promise.resolve({
-                publicKey: this.#publicKey,
-                privateKey: this.#privateKey
+                publicKey: this._publicKey,
+                privateKey: this._privateKey
             });
         }
 
@@ -220,28 +220,28 @@ class Peer {
 
             try {
 
-                if (this.#privateKey != null) {
-                    this.#privateKeyArmored = this.#privateKey;
+                if (this._privateKey != null) {
+                    this._privateKeyArmored = this._privateKey;
                 } else {
 
                     logger.debug('Generating private/public keys...');
 
-                    this.#privateKeyPass = this.#privateKeyPass != null ? this.#privateKeyPass : uuidv4();
+                    this._privateKeyPass = this._privateKeyPass != null ? this._privateKeyPass : uuidv4();
 
                     // A client key is generated on each use. It is only used by the browser during the instance
                     // session.
-                    const {privateKeyArmored, publicKeyArmored} = await generateKeyPair(uuidv4(), 'web-client@peernet.dev', this.#privateKeyPass)
+                    const {privateKeyArmored, publicKeyArmored} = await generateKeyPair(uuidv4(), 'web-client@peernet.dev', this._privateKeyPass)
 
-                    this.#privateKeyArmored = privateKeyArmored;
-                    this.#publicKey = publicKeyArmored;
+                    this._privateKeyArmored = privateKeyArmored;
+                    this._publicKey = publicKeyArmored;
                 }
 
                 logger.debug('Initializing IPFS...');
 
                 let node;
 
-                if (this.#proxyMode === true) {
-                    node = ipfsClient(this.#proxyHost);
+                if (this._proxyMode === true) {
+                    node = ipfsClient(this._proxyHost);
                     await node.id()
                     this.ipfs = node;
                 } else {
@@ -250,10 +250,10 @@ class Peer {
                     // The browser uses a different set of bootstrap nodes.
                     if ((typeof window) === 'undefined') {
                         options = {
-                            repo: this.#config.repo ? this.#config.repo : undefined,
+                            repo: this._config.repo ? this._config.repo : undefined,
                             config: {
                                 // If you want to connect to the public bootstrap nodes, remove the next line
-                                Bootstrap: this.#bootstraps.concat(DEFAULT_BOOTSTRAP)
+                                Bootstrap: this._bootstraps.concat(DEFAULT_BOOTSTRAP)
                             }
                         }
                     } else {
@@ -264,7 +264,7 @@ class Peer {
                                     Swarm: []
                                 },
                                 // If you want to connect to the public bootstrap nodes, remove the next line
-                                Bootstrap: this.#bootstraps.concat(
+                                Bootstrap: this._bootstraps.concat(
                                     DEFAULT_BOOTSTRAP_BROWSER
                                 )
                             }
@@ -298,7 +298,7 @@ class Peer {
                 }
 
                 // Note: let's add our peer data to IPFS
-                const peerCid = await add(node, this.#publicKey);
+                const peerCid = await add(node, this._publicKey);
 
                 logger.debug('Pinning peer CID: ' + peerCid);
 
@@ -307,34 +307,34 @@ class Peer {
                 logger.debug('Adding direct relay peers...');
 
                 // these are hosts that we are relaying data for.
-                // we need to add these to the this.#relayedPeers map
+                // we need to add these to the this._relayedPeers map
                 // to tell the peer to allow these messages to be relayed
-                for (const peer of this.#relayPeers) {
-                    const peerData = await this.#getPeerData(peer);
+                for (const peer of this._relayPeers) {
+                    const peerData = await this._getPeerData(peer);
 
                     // for non passthrough mode
                     // this must be false
-                    this.#relayedPeers.set(peerData.address, false);
+                    this._relayedPeers.set(peerData.address, false);
                 }
 
                 logger.debug('Configuring pass-through relay peers...');
 
-                for (const peer of this.#passthroughPeers) {
+                for (const peer of this._passthroughPeers) {
                     await this.relayPeer(peer, true);
                 }
 
                 // This will attempt to keep things connected.
-                this.#bootstrapTimer = setInterval(async () => {
-                    await this.#reconnectBootstraps();
+                this._bootstrapTimer = setInterval(async () => {
+                    await this._reconnectBootstraps();
                 }, 15000 * 3);
 
-                this.#started = true;
+                this._started = true;
 
                 logger.info('Started! Your peer CID is: ' + peerCid);
 
                 accept({
-                    publicKey: this.#publicKey,
-                    privateKey: this.#privateKeyArmored
+                    publicKey: this._publicKey,
+                    privateKey: this._privateKeyArmored
                 });
             } catch (err) {
                 reject(err);
@@ -355,12 +355,12 @@ class Peer {
                 return;
             }
 
-            const peerData = await this.#getPeerData(peer);
+            const peerData = await this._getPeerData(peer);
 
             let originalValue = null;
 
-            if (this.#relayedPeers.has(peerData.address)) {
-                const value = this.#relayedPeers.get(peerData.address);
+            if (this._relayedPeers.has(peerData.address)) {
+                const value = this._relayedPeers.get(peerData.address);
 
                 // only check if a pass-through already
                 // exists for this peer only if we are
@@ -374,7 +374,7 @@ class Peer {
 
             if (passthrough === false) {
                 // if the original value isn't false
-                this.#relayedPeers.set(peerData.address, originalValue != null ? originalValue : false);
+                this._relayedPeers.set(peerData.address, originalValue != null ? originalValue : false);
                 accept();
             } else {
 
@@ -387,8 +387,8 @@ class Peer {
 
                 await this.ipfs.pubsub.subscribe(peerData.address, handler);
 
-                this.#subscriptions.set(peerData.address, handler);
-                this.#relayedPeers.set(peerData.address, true);
+                this._subscriptions.set(peerData.address, handler);
+                this._relayedPeers.set(peerData.address, true);
 
                 if (until > 0) {
                     setTimeout(async () => {
@@ -396,16 +396,16 @@ class Peer {
                             await this.ipfs.pubsub.unsubscribe(peerData.address, handler)
                         } catch (err) {
                         } finally {
-                            this.#subscriptions.delete(peerData.address);
+                            this._subscriptions.delete(peerData.address);
 
                             // if the original value was anything other
                             // than null, that means this peer is a trusted
                             // relay peer. we just don't want to pass-through
                             // relay anymore
                             if (originalValue !== null) {
-                                this.#relayedPeers.set(peerData.address, false);
+                                this._relayedPeers.set(peerData.address, false);
                             } else {
-                                this.#relayedPeers.remove(peerData.address);
+                                this._relayedPeers.remove(peerData.address);
                             }
                         }
                     }, until);
@@ -424,9 +424,9 @@ class Peer {
      * @returns {Peer} returns this peer for method chaining
      */
     passthrough(passthrough) {
-        this.#passthrough = passthrough === true;
-        this.#handleMessages = passthrough === true ? false : this.#handleMessages;
-        this.#relayMessages = passthrough === true ? false : this.#handleMessages;
+        this._passthrough = passthrough === true;
+        this._handleMessages = passthrough === true ? false : this._handleMessages;
+        this._relayMessages = passthrough === true ? false : this._handleMessages;
 
         return this;
     }
@@ -439,9 +439,9 @@ class Peer {
      * @returns {Peer} returns this for method chaining
      */
     receive(receiveMessages) {
-        this.#passthrough = receiveMessages === true ? false : this.#passthrough;
+        this._passthrough = receiveMessages === true ? false : this._passthrough;
 
-        this.#handleMessages = receiveMessages ? receiveMessages : true;
+        this._handleMessages = receiveMessages ? receiveMessages : true;
         return this;
     }
 
@@ -453,9 +453,9 @@ class Peer {
      * @returns {Peer} returns this for method chaining
      */
     relay(relayMessages) {
-        this.#passthrough = relayMessages === true ? false : this.#passthrough;
+        this._passthrough = relayMessages === true ? false : this._passthrough;
 
-        this.#relayMessages = relayMessages ? relayMessages : false;
+        this._relayMessages = relayMessages ? relayMessages : false;
         return this;
     }
 
@@ -471,13 +471,13 @@ class Peer {
         return new Promise(async (accept, reject) => {
             try {
 
-                this.#checkInitialized();
+                this._checkInitialized();
 
-                const peer = await this.#getPeerData(this.#publicKey);
+                const peer = await this._getPeerData(this._publicKey);
 
                 const node = this.ipfs;
 
-                if (this.#relayedPeers.has(peer.address)) {
+                if (this._relayedPeers.has(peer.address)) {
                     reject('This peer is already receiving events.');
                     return;
                 }
@@ -485,27 +485,27 @@ class Peer {
                 const receiveMsg = async (msg) => {
                     try {
                         // we don't need to do anything at all
-                        if (this.#passthrough === true) {
+                        if (this._passthrough === true) {
                             return;
                         }
 
                         const msgData = msg.data.toString();
 
-                        if (this.#msgCache.has(msgData)) {
+                        if (this._msgCache.has(msgData)) {
                             return;
                         }
 
-                        const decrypted = await decrypt(this.#privateKeyArmored, this.#privateKeyPass, msgData);
+                        const decrypted = await decrypt(this._privateKeyArmored, this._privateKeyPass, msgData);
 
                         const _data = JSON.parse(decrypted);
 
                         const {ack, payload, key} = _data;
 
-                        this.#msgCache.set(msgData, true);
+                        this._msgCache.set(msgData, true);
 
                         setTimeout(() => {
                             try {
-                                this.#msgCache.delete(msg);
+                                this._msgCache.delete(msg);
                             } catch (ignored) {
                             }
                         }, 60000 * 5)
@@ -513,7 +513,7 @@ class Peer {
                         if (payload.hasOwnProperty('message')) {
                             // handle direct messages
 
-                            if (this.#handleMessages !== true) {
+                            if (this._handleMessages !== true) {
                                 return;
                             }
 
@@ -521,9 +521,9 @@ class Peer {
 
                             const ackHash = await Hash.of(Buffer.from(msgAck));
 
-                            if (this.#checkPubAcks === true) {
-                                if (this.#ackExists !== null) {
-                                    const exists = await this.#ackExists();
+                            if (this._checkPubAcks === true) {
+                                if (this._ackExists !== null) {
+                                    const exists = await this._ackExists();
 
                                     if (exists) {
                                         return true;
@@ -554,9 +554,9 @@ class Peer {
                                     logger.debug('Sending reply...')
 
                                     // let's go ahead and craft a reply.
-                                    const peerData = await this.#getPeerData(key);
+                                    const peerData = await this._getPeerData(key);
 
-                                    const signedMsg = await sign(this.#privateKeyArmored, this.#privateKeyPass,
+                                    const signedMsg = await sign(this._privateKeyArmored, this._privateKeyPass,
                                         replyResult != null ? replyResult.toString() : '');
 
                                     // can we possible return a list of peers to bootstrap from?
@@ -569,7 +569,7 @@ class Peer {
                                                 'replyId': payload['replyId']
                                             }
                                         },
-                                        "key": this.#publicKey
+                                        "key": this._publicKey
                                     };
 
                                     const replyEnc = await encrypt(peerData.publicKey, JSON.stringify(replyData))
@@ -591,9 +591,9 @@ class Peer {
                                 await pin(node, ackCid);
                             } catch (ignored){}
 
-                            if (this.#storeAck !== null) {
+                            if (this._storeAck !== null) {
                                 try {
-                                    this.#storeAck(ackCid);
+                                    this._storeAck(ackCid);
                                 } catch (err) {
                                     logger.error(err);
                                 }
@@ -615,16 +615,16 @@ class Peer {
                         } else if (payload.hasOwnProperty('relay')) {
                             // Handle Direct Relay Messages
 
-                            if (this.#relayMessages !== true) {
+                            if (this._relayMessages !== true) {
                                 return;
                             }
 
                             const {data: relayMsg, peer: relayPeer, reply} = payload.relay;
 
-                            const {address: topic} = await this.#getPeerData(relayPeer);
+                            const {address: topic} = await this._getPeerData(relayPeer);
 
                             // only trusted peers can be here.
-                            if (this.#relayedPeers.has(topic)) {
+                            if (this._relayedPeers.has(topic)) {
 
                                 logger.debug('Relaying direct message to: ' + topic);
 
@@ -666,16 +666,16 @@ class Peer {
                             // handle direct replies
 
                             const {message, replyId} = payload.reply;
-                            const replyPublicKey = this.#replyHosts.get(replyId);
-                            this.#replyHosts.delete(replyId);
+                            const replyPublicKey = this._replyHosts.get(replyId);
+                            this._replyHosts.delete(replyId);
 
                             // was the message received by the peer we sent it to?
                             const verified = await verify(replyPublicKey, message);
 
                             if (verified != null) {
-                                if (this.#replyCallbacks.has(replyId)) {
-                                    const replyCb = this.#replyCallbacks.get(replyId);
-                                    this.#replyCallbacks.delete(replyId);
+                                if (this._replyCallbacks.has(replyId)) {
+                                    const replyCb = this._replyCallbacks.get(replyId);
+                                    this._replyCallbacks.delete(replyId);
 
                                     try {
                                         replyCb(null, verified);
@@ -692,14 +692,14 @@ class Peer {
                     }
                 };
 
-                const peerData = await this.#getPeerData(this.#publicKey);
+                const peerData = await this._getPeerData(this._publicKey);
 
                 await node.pubsub.subscribe(peerData.address, receiveMsg);
 
                 logger.debug('Subscribing to messages for the topic: ' + peerData.address);
 
-                this.#subscriptions.set(peer.address, receiveMsg);
-                this.#relayedPeers.set(peer.address, true);
+                this._subscriptions.set(peer.address, receiveMsg);
+                this._relayedPeers.set(peer.address, true);
                 accept();
             } catch (err) {
                 reject(err);
@@ -726,20 +726,20 @@ class Peer {
 
         return new Promise(async (finished, failed) => {
             try {
-                this.#checkInitialized();
+                this._checkInitialized();
 
 
                 // retrieve the peer data for the
                 // peer we wish to send a message to.
                 const node = this.ipfs,
-                    peerData = await this.#getPeerData(peer);
+                    peerData = await this._getPeerData(peer);
 
                 // generate message acknowledgement data
                 const msgAck = randomData();
 
                 // generate message acknowledgement data for
                 // each relay.
-                const relayAcks = this.#relays.map(() => {
+                const relayAcks = this._relays.map(() => {
                     return randomData()
                 });
 
@@ -750,8 +750,8 @@ class Peer {
                 // as a callback.
                 if ((typeof callback) === 'function') {
                     replyId = uuidv4();
-                    this.#replyCallbacks.set(replyId, callback);
-                    this.#replyHosts.set(replyId, peerData.publicKey);
+                    this._replyCallbacks.set(replyId, callback);
+                    this._replyHosts.set(replyId, peerData.publicKey);
                 }
 
                 // create the payload that will be
@@ -765,7 +765,7 @@ class Peer {
                     "ack": {
                         "data": msgAck
                     },
-                    "key": this.#publicKey,
+                    "key": this._publicKey,
                     "relayAck": relayAcks // this is where the peer needs to send an ack back
                 };
 
@@ -786,10 +786,10 @@ class Peer {
                 const timeouts = [];
 
                 // Publish the message to the relay peers
-                for (const relayPeer of this.#relays) {
-                    const idx = this.#relays.indexOf(relayPeer);
+                for (const relayPeer of this._relays) {
+                    const idx = this._relays.indexOf(relayPeer);
                     const relayAckData = relayAcks[idx];
-                    const relayPeerData = await this.#getPeerData(relayPeer);
+                    const relayPeerData = await this._getPeerData(relayPeer);
                     const relayPubKey = relayPeerData.publicKey;
 
                     const relayMsg = JSON.stringify({
@@ -800,7 +800,7 @@ class Peer {
                                 'reply': replyId != null // tell the relay to attempt to relay replies
                             }
                         },
-                        'key': this.#publicKey,
+                        'key': this._publicKey,
                         'ack': {
                             'data': relayAckData
                         }

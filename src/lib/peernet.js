@@ -5,7 +5,7 @@ import Base64 from 'crypto-js/enc-base64.js';
 import ipfsClient from 'ipfs-http-client';
 import {generateKeyPair, sign, encrypt, decrypt, verify} from './util/crypto.js';
 import {sleep, uuidv4, randomData} from './util/index.js';
-import {add, cat, pin, connect, DEFAULT_BOOTSTRAP, DEFAULT_BOOTSTRAP_BROWSER} from './util/ipfs.js';
+import {add, cat, pin, connect, disconnect, DEFAULT_BOOTSTRAP, DEFAULT_BOOTSTRAP_BROWSER} from './util/ipfs.js';
 import logger from './util/logger.js';
 
 const PEERNET_BOOTSTRAP = [
@@ -68,13 +68,58 @@ class Peer {
         throw "Not initialized!";
     }
 
+    _doPeerCheck = async () => {
+        // let's check for any dead peers
+        const peers = await this.ipfs.swarm.peers();
+
+        for (const peer of peers) {
+            try {
+                let pass = false;
+                for await (const ping of ( this.ipfs.ping(peer.peer, {
+                    'timeout': '5s'
+                }))){
+                    if (ping.success === true) {
+                        pass = true;
+                        break;
+                    }
+                }
+                if (pass) {
+                    continue;
+                }
+            } catch(err){
+            }
+
+            try {
+                logger.info('Disconnecting from ' + peer.addr)
+                await disconnect(this.ipfs, peer.addr);
+                await sleep(150);
+                logger.info('Connecting to ' + peer.addr)
+                await connect(this.ipfs, peer.addr);
+            } catch (err) {
+                logger.error(err)
+            }
+        }
+    }
+
     _reconnectBootstraps = async () => {
+        const _peerId = await this.ipfs.id();
         const peers = await this.ipfs.swarm.peers();
         const peerAddrs = peers.map((peer) => {
             return peer.addr.toString();
         });
+        const peerIds = peers.map((peer) => {
+            return peer.id;
+        });
         for (const addr of this._bootstraps) {
-            if (peerAddrs.indexOf(addr) === -1) {
+            const idx = peerAddrs.indexOf(addr);
+
+            const peerId = peerIds[idx];
+
+            if (_peerId === peerId) {
+                continue;
+            }
+
+            if (idx === -1) {
                 try {
                     await connect(this.ipfs, addr);
                 } catch (err) {
@@ -87,6 +132,8 @@ class Peer {
         this._checkInitialized();
 
         const ipfs = this.ipfs;
+
+        // todo this needs to be optimized
 
         // todo attempt to validate.
         if (this._peerPubKeyCache.has(peer)) {
@@ -328,6 +375,12 @@ class Peer {
                     await this._reconnectBootstraps();
                 }, 15000 * 3);
 
+                this._pingTimer = setInterval(async () => {
+
+                    await this._doPeerCheck();
+
+                }, 60000 * 1.5);
+
                 this._started = true;
 
                 logger.info('Started! Your peer CID is: ' + peerCid);
@@ -484,7 +537,6 @@ class Peer {
 
                 const receiveMsg = async (msg) => {
                     try {
-                        // we don't need to do anything at all
                         if (this._passthrough === true) {
                             return;
                         }
@@ -522,6 +574,8 @@ class Peer {
                             const ackHash = await Hash.of(Buffer.from(msgAck));
 
                             if (this._checkPubAcks === true) {
+                                // let's run our custom function
+                                // to determine if the ack exists
                                 if (this._ackExists !== null) {
                                     const exists = await this._ackExists();
 
@@ -591,6 +645,8 @@ class Peer {
                                 await pin(node, ackCid);
                             } catch (ignored){}
 
+                            // run our custom function
+                            // to store the ack
                             if (this._storeAck !== null) {
                                 try {
                                     this._storeAck(ackCid);
@@ -628,10 +684,12 @@ class Peer {
 
                                 logger.debug('Relaying direct message to: ' + topic);
 
-                                // does this relay have a reply route??
+                                // we do this to attempt to support the
+                                // delivery of the callback response
                                 if (reply === true) {
                                     logger.debug('Reply wanted, attempting temporary pass-through relay...')
                                     try {
+                                        // We will relay this for about 2 minutes
                                         await this.relayPeer(key, true, 1000 * 120);
                                     } catch (ignored) {
                                     }
@@ -696,12 +754,13 @@ class Peer {
 
                 await node.pubsub.subscribe(peerData.address, receiveMsg);
 
-                logger.debug('Subscribing to messages for the topic: ' + peerData.address);
+                logger.debug('Subscribing to messages destined for this peer...');
 
                 this._subscriptions.set(peer.address, receiveMsg);
                 this._relayedPeers.set(peer.address, true);
                 accept();
             } catch (err) {
+                logger.error('Subscription failure: ' + err);
                 reject(err);
             }
         });
@@ -721,7 +780,7 @@ class Peer {
      * @returns {Promise<>} a promise that will complete when a message acknowledgement is received.
      */
     pub(peer, address, msg, timeout, callback) {
-        timeout = ((typeof timeout) === 'string') ? timeout : '60s';
+        timeout = ((typeof timeout) === 'string') ? timeout : '120s';
         callback = ((typeof callback) === 'function') ? callback : ((typeof timeout) === 'function') ? timeout : null;
 
         return new Promise(async (finished, failed) => {
@@ -808,6 +867,8 @@ class Peer {
 
                     const encryptedRelay = await encrypt(relayPubKey, relayMsg);
 
+                    logger.debug('Relaying message to peer ' + relayPeerData.address);
+
                     await node.pubsub.publish(relayPeerData.address, encryptedRelay);
 
                     const relayTimeout = setInterval(async () => {
@@ -819,27 +880,35 @@ class Peer {
 
                 try {
 
+                    timeouts.push(setTimeout(async () => {
+                        await this._doPeerCheck();
+                    }, 15000))
+
                     // does the acknowledgement exist?
                     const ackHash = await Hash.of(Buffer.from(msgAck));
                     const ackData = await cat(node, ackHash, timeout);
-
-                    clearTimeout(repeat);
-                    clearTimeout(timeout);
-
-                    for (const t of timeouts) {
-                        clearTimeout(t);
-                    }
 
                     // since the data was added to IPFS, we know the peer
                     // received the data.
                     if (ackData === msgAck) {
                         finished();
                     } else {
-                        // todo a better error
-                        failed('Invalid ack data 0.o which is normally impossible.');
+                        if (ackData == null) {
+                            failed('Timeout reached while waiting for a reply or acknowledgement.');
+                        } else {
+                            // todo a better error
+                            failed('Invalid ack data 0.o which is normally impossible.');
+                        }
                     }
                 } catch (err) {
                     failed('Timeout reached while waiting for a reply or acknowledgement.');
+                } finally {
+                    clearTimeout(repeat);
+                    clearTimeout(timeout);
+
+                    for (const t of timeouts) {
+                        clearTimeout(t);
+                    }
                 }
             } catch (err) {
                 failed(err);

@@ -62,9 +62,11 @@ export async function unpin(node, cid) {
     return await node.pin.rm(cid);
 }
 
-export async function connect(node, host) {
-    // todo check if already connected
-    const peers = await node.swarm.peers();
-
-    await node.swarm.connect(host);
+export async function connect(node, peer) {
+    await node.swarm.connect(peer);
 }
+
+export async function disconnect(node, peer) {
+    await node.swarm.disconnect(peer);
+}
+

@@ -4,7 +4,7 @@ const { combine, timestamp, label, printf } = winston.format;
 import BrowserConsole from "winston-transport-browserconsole";
 
 const formatter = combine(
-    label({ label: 'peer.js' }),
+    label({ label: 'peernet.js' }),
     timestamp(),
     printf(({ level, message, label, timestamp }) => {
         return `[${label}] ${timestamp} ${level}: ${message}`;

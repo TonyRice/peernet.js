@@ -1,6 +1,6 @@
-# peer.js
+# peernet.js
 
-peer.js provides a simple pub/sub system built using OpenPGP and IPFS pubsub.
+peernet.js provides a simple pub/sub system built using OpenPGP and IPFS pubsub.
 
 It was created as a simple way to send encrypted messages through
 IPFS pubsub with acknowledgement of message delivery. It does this by 

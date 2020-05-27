@@ -1,12 +1,13 @@
 {
   "name": "peernet-js",
-  "version": "0.0.12",
+  "version": "0.0.24",
   "description": "peernet.js provides a simple message acknowledgement layer built using OpenPGP and IPFS pubsub.",
   "main": "src/index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "build": "webpack --config webpack.config.js",
-    "lint": "eslint --ext .js --ignore-path .gitignore ."
+    "lint": "eslint --ext .js --ignore-path .gitignore .",
+    "pretty": "eslint --fix --ext .js --ignore-path .gitignore ."
   },
   "author": "Tony Rice <tony@tonyrice.me>",
   "license": "MIT",

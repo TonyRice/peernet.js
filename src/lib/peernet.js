@@ -73,15 +73,43 @@ class Peer {
     // let's check for any dead peers
     const peers = await this.ipfs.swarm.peers();
 
+    const findBootStrapAddr = (peer) => {
+      for (const bootstrap of this._bootstraps) {
+        if (bootstrap.indexOf(peer.peer) > -1) {
+          return bootstrap;
+        }
+      }
+      return null;
+    };
+
     for (const peer of peers) {
+
+      let pass = false;
+
+      const addr = findBootStrapAddr(peer);
+
+      if (addr == null) {
+        continue;
+      }
       try {
-        let pass = false;
+
         for await (const ping of (this.ipfs.ping(peer.peer, {
-          'timeout': '5s'
+          'timeout': '5s',
+          'count' : 5
         }))) {
           if (ping.success === true) {
-            pass = true;
+            if (ping.text === "PING " + peer.peer){
+              continue;
+            }
+
+            if (ping.text === "" && ping.time > 0) {
+              pass = true;
+            } else {
+              pass = ping.text !== "" && !ping.text.startsWith('PING ') && ping.time === 0;
+            }
             break;
+          } else {
+            pass = false;
           }
         }
         if (pass) {
@@ -92,13 +120,20 @@ class Peer {
       }
 
       try {
-        logger.info('Disconnecting from ' + peer.addr)
-        await disconnect(this.ipfs, peer.addr);
-        await sleep(150);
-        logger.info('Connecting to ' + peer.addr)
-        await connect(this.ipfs, peer.addr);
+        logger.info('Disconnecting from ' + addr);
+
+        try {
+
+          await disconnect(this.ipfs, addr);
+          await sleep(150);
+        } catch (ignored) {
+        } finally {
+          logger.info('Connecting to ' + addr);
+
+          await connect(this.ipfs, addr);
+        }
       } catch (err) {
-        logger.error(err)
+        logger.error('Peer Reconnect Failed: ' + err.toString())
       }
     }
   }
@@ -128,7 +163,54 @@ class Peer {
         }
       }
     }
-  }
+  };
+
+  _waitForAck = async (ackData, timeout) => {
+    timeout = timeout ? timeout : '30s';
+
+    try {
+
+      const ackHash = await Hash.of(Buffer.from(ackData));
+
+      logger.debug('Waiting for ack: ' + ackHash);
+
+      // let's relay this until we got the ack.
+      const detectedAckData = await cat(this.ipfs, ackHash, timeout);
+
+      if (detectedAckData === ackData) {
+        logger.debug('Ack detected!! ' + ackHash);
+      }
+
+      return detectedAckData;
+
+    } catch (err) {
+      logger.error('waitForAck: ' + err);
+    }
+    return null;
+  };
+
+  _handleAck = async (ackData) => {
+    const ackCid = await add(this.ipfs, ackData);
+
+    try {
+      await pin(this.ipfs, ackCid);
+    } catch (ignored) {
+    }
+
+    // run our custom function
+    // to store the ack
+    if (this._storeAck !== null) {
+      try {
+        this._storeAck(ackCid);
+      } catch (err) {
+        logger.error('Failed to store ack: ' + err.toString());
+      }
+    }
+
+    logger.debug('Acknowledgement added: ' + ackCid);
+
+    return ackCid;
+  };
 
   _storeMessage = async (peer) => {
     const peerData = await this._getPeerData(peer);
@@ -223,7 +305,7 @@ class Peer {
   constructor(config) {
     config = config ? config : {
       relays: []
-    }
+    };
 
     this._bootstraps = config.bootstrap ? config.bootstrap : [];
 
@@ -436,7 +518,7 @@ class Peer {
 
           // if this peer isn't subscribed to messages then we don't need
           // to check for any from any relays
-          if (!this._relayedPeers.has(peer.address) && !this._handleMessages) {
+          if (!this._relayedPeers.has(peer.address) && !this._handleMessages || ((typeof window) !== 'undefined')) {
             return;
           }
 
@@ -448,7 +530,7 @@ class Peer {
             const retrieveMsg = {
               "payload": {
                 'type': 'retrieve',
-                'count': await sign(this._privateKey, this._privateKeyPass, "15")
+                'count': await sign(this._privateKeyArmored, this._privateKeyPass, "15")
               },
               "ack": {
                 "data": relayAckData
@@ -464,16 +546,21 @@ class Peer {
               await node.pubsub.publish(relayPeerData.address, encrypted);
             }, 1500);
 
-            const ackHash = await Hash.of(Buffer.from(relayAckData));
-            const ackData = await cat(node, ackHash, '15s');
 
-            if (ackData === relayAckData) {
+            try {
 
-            } else {
-              logger.debug('Failed to retrieve messages from the relay: ' + relayPeerData);
+              const ackHash = await Hash.of(Buffer.from(relayAckData));
+
+              const ackData = await cat(node, ackHash, '15s');
+
+              if (ackData !== relayAckData) {
+                logger.debug('Failed to retrieve messages from the relay: ' + relayPeerData);
+              }
+            } catch (err) {
+
+            } finally {
+              clearTimeout(relayTimeout);
             }
-
-            clearTimeout(relayTimeout);
           }
 
         }, 30000);
@@ -525,6 +612,9 @@ class Peer {
       if (passthrough === false) {
         // if the original value isn't false
         this._relayedPeers.set(peerData.address, originalValue != null ? originalValue : false);
+
+        // any peers we pass here directly must be added to the relay peer trust
+        this._relayPeers.push(peerData.cid);
         accept();
       } else {
 
@@ -556,7 +646,7 @@ class Peer {
               if (originalValue !== null) {
                 this._relayedPeers.set(peerData.address, false);
               } else {
-                this._relayedPeers.remove(peerData.address);
+                this._relayedPeers.delete(peerData.address);
               }
             }
           }, until);
@@ -681,12 +771,12 @@ class Peer {
             const _data = JSON.parse(decrypted);
             const {ack, payload, key} = _data;
 
-
             const {type} = payload;
-
 
             // let's go ahead and craft a reply.
             const peerData = await this._getPeerData(key);
+
+            logger.debug('Processing message with the type \'' + type + '\' from the peer ' + peerData.cid);
 
             this._msgCache.set(msgData, true);
 
@@ -699,12 +789,9 @@ class Peer {
 
             if (type === 'msg') {
               // handle direct messages
-
               if (this._handleMessages !== true) {
                 return;
               }
-
-              console.log('got a message');
 
               await checkHits(msg.from);
 
@@ -712,7 +799,10 @@ class Peer {
 
               const ackHash = await Hash.of(Buffer.from(msgAck));
 
-              if (this._checkPubAcks === true) {
+
+              if (this._checkPubAcks === true && false) {
+                logger.debug('Checking if message acknowledgement exists \'' + ackHash + '\'...');
+
                 // let's run our custom function
                 // to determine if the ack exists
                 if (this._ackExists !== null) {
@@ -722,12 +812,13 @@ class Peer {
                     return true;
                   }
                 } else {
+
                   // this should be optimized
                   const detectedAck = await cat(node, ackHash, '5s');
 
                   // this should return null
                   if (detectedAck != null) {
-                    logger.debug('Ack already exists. Not handling message.');
+                    logger.debug('Message acknowledgement exists \'' + ackHash + '\'...');
                     return null;
                   }
                 }
@@ -736,82 +827,78 @@ class Peer {
               try {
                 let replyResult = null;
                 if ((typeof handler) === 'function') {
-                  const result = await handler(payload.address, payload.message);
-                  if (result != null) {
-                    replyResult = result;
+                  logger.debug('Processing pub message on the address \'' + payload.address + '\',,,');
+                  try {
+                    const result = await handler(payload.address, payload.message);
+                    if (result != null) {
+                      replyResult = result;
+                    }
+                  } catch (e) {
+                    logger.error('Failed to process pub message on the address \'' + payload.address + '\'! ' + e.toString());
                   }
                 }
 
                 // the client is expecting a reply...
-                if (payload.hasOwnProperty('replyId')) {
+                if (payload.hasOwnProperty('replyId') && payload['replyId'] != null) {
 
-                  logger.debug('Sending reply...');
+                  logger.debug('Sending reply to the peer \'' + peerData.cid + '\'...');
 
                   const signedMsg = await sign(this._privateKeyArmored, this._privateKeyPass,
                     replyResult != null ? replyResult.toString() : '');
 
                   // can we possible return a list of peers to bootstrap from?
 
+                  const replyAckData = randomData();
+
                   // sign the payload
-                  const replyData = {
+                  const replyLoad = {
                     "payload": {
-                      "reply": {
-                        'type': 'reply',
-                        'message': signedMsg,
-                        'replyId': payload['replyId']
-                      }
+                      'type': 'reply',
+                      'message': signedMsg,
+                      'replyId': payload['replyId']
                     },
-                    "key": this._publicKey
+                    "key": this._publicKey,
+                    "ack" : {
+                      data: replyAckData
+                    }
                   };
 
-                  const replyEnc = await encrypt(peerData.publicKey, JSON.stringify(replyData))
+                  const replyEnc = await encrypt(peerData.publicKey, JSON.stringify(replyLoad));
+
+                  // TODO should we send this reply until we get an ack?
+
+                  const repeat = setInterval(async () => {
+                    await node.pubsub.publish(peerData.address, replyEnc);
+                  }, 2500);
 
                   await node.pubsub.publish(peerData.address, replyEnc);
 
+                  try {
+                    await this._waitForAck(replyAckData);
+                  }catch (err) {
+                    logger.error('Reply Ack Error: ' + err.toString());
+                  } finally {
+                    clearTimeout(repeat);
+                  }
                 }
               } catch (err) {
-                logger.error('Failed to process message: ' + err);
+                logger.error('Failed to process message: ' + err.toString());
               }
 
-              // begin message acknowledgement
-              // Note: is this resilient as it could be ?
-              // ideally the nodes acknowledging the message
-              // should
-              const ackCid = await add(node, msgAck);
+              // Acknowledge the request!
+              await this._handleAck(msgAck);
 
-              try {
-                await pin(node, ackCid);
-              } catch (ignored) {
-              }
-
-              // run our custom function
-              // to store the ack
-              if (this._storeAck !== null) {
-                try {
-                  this._storeAck(ackCid);
-                } catch (err) {
-                  logger.error(err);
-                }
-              }
-
-              logger.debug('Acknowledgement added: ' + ackCid);
-
-              if (_data.hasOwnProperty('relayAck')) {
-                const relayAcks = _data.relayAck;
+              if (payload.hasOwnProperty('relayAck')) {
+                const relayAcks = payload.relayAck;
                 for (const relayAck of relayAcks) {
-                  const relayAckCid = await add(node, relayAck);
-                  try {
-                    await pin(node, relayAckCid);
-                  } catch (ignored) {
-                  }
-                  logger.debug('Relay acknowledgement added: ' + relayAckCid);
+                  await this._handleAck(relayAck);
                 }
               }
 
             } else if (type === 'retrieve') {
 
               // only trusted relayed peers can retrieve messages
-              if (this._relayedPeers.has(peerData.address)) {
+              if (this._relayPeers.indexOf(peerData.cid) >-1 || this._relayPeers.indexOf(peerData.publicKey) > -1) {
 
                 // we need to verify this message
                 const count = await verify(peerData.publicKey, payload['count']);
@@ -845,38 +932,14 @@ class Peer {
 
                   const {data: msgAck} = ack;
 
-                  const ackCid = await add(node, msgAck);
-
-                  try {
-                    await pin(node, ackCid);
-                  } catch (ignored) {
-                  }
-
-                  // run our custom function
-                  // to store the ack
-                  if (this._storeAck !== null) {
-                    try {
-                      this._storeAck(ackCid);
-                    } catch (err) {
-                      logger.error(err);
-                    }
-                  }
-
-                  logger.debug('Retrieve acknowledgement added: ' + ackCid);
+                  await this._handleAck(msgAck);
 
                   try {
 
-                    const retrieveAckHash = await Hash.of(Buffer.from(retrieveAckData));
-
-                    // let's relay this until we got the ack.
-                    const detectedAckData = await cat(node, retrieveAckHash, '30s');
-
-                    if (detectedAckData === retrieveAckData) {
-                      logger.debug('Retrieve ack received! ' + retrieveAckHash);
-                    }
+                    await this._waitForAck(retrieveAckData);
 
                   } catch (err) {
-                    logger.error(err);
+                    logger.error('failed to wait for ack ' + err.toString());
                   } finally {
                     clearTimeout(repeat);
                   }
@@ -886,7 +949,7 @@ class Peer {
             } else if (type === 'response') {
               // we will only handle response messages
               // from a relay peer
-              if (this._relays.indexOf(peerData.cid) > -1) {
+              if (this._relays.indexOf(peerData.cid) > -1 || this._relays.indexOf(peerData.publicKey) > -1) {
 
                 const messages = await verify(peerData.publicKey, payload['response']);
 
@@ -906,6 +969,11 @@ class Peer {
                       await this.ipfs.pubsub.publish(peer.address, data);
                     }
                   }
+
+                  const {data: msgAck} = ack;
+
+                  await this._handleAck(msgAck);
+
                 }
               }
             } else if (type === 'relay') {
@@ -917,13 +985,12 @@ class Peer {
 
               await checkHits(msg.from);
 
-              const {data: relayMsg, peer: relayPeer, reply} = payload;;
+              const {data: relayMsg, peer: relayPeer, reply} = payload;
 
-              const {address: topic} = await this._getPeerData(relayPeer);
+              const {address: topic, cid: relayCid, publicKey: relayKey} = await this._getPeerData(relayPeer);
 
-              // we can only relay messages
-              // destined for any peers we trust
-              if (this._relayedPeers.has(topic)) {
+              // we can only directly relay data to peers with trust
+              if (this._relayPeers.indexOf(relayCid) > -1 || this._relayPeers.indexOf(relayKey) > -1) {
 
                 // We can't really trust this message. but what is there not to trust?
                 // we're only sending it off somewhere!
@@ -952,8 +1019,6 @@ class Peer {
                   }
                 }
 
-                // what if we're relaying a bunch of messages?
-
                 // Begin relaying!
                 const repeat = setInterval(async () => {
                   await node.pubsub.publish(topic, relayMsg);
@@ -965,22 +1030,26 @@ class Peer {
 
                   const msgHash = '/msgs/' + topic + '/' + uuidv4();
 
+                  logger.debug('Adding message for temporary storage: ' + msgHash);
+
                   await this.ipfs.files.write(msgHash, relayMsg, {
                     create: true,
                     parents: true
                   });
 
-                  // let's relay this until we got the ack.
-                  const detectedAckData = await cat(node, relayAckHash, '30s');
+                  const detectedAckData = await this._waitForAck(relayAckData, '90s');
 
                   if (detectedAckData === relayAckData) {
-                    logger.debug('Relay ack received! ' + relayAckHash);
-                    await this.ipfs.files.delete(msgHash);
+                    try {
+                      await this.ipfs.files.rm(msgHash);
+                    } catch (e) {
+                      logger.error('Failed to delete message from temporary storage: ' + msgHash + ' ' + e.toString())
+                    }
                   } else {
                     logger.debug('Failed to relay direct message to: ' + topic);
                   }
                 } catch (err) {
-                  logger.error(err);
+                  logger.error('Relay Ack Error: ' + err.toString());
                 } finally {
                   clearTimeout(repeat);
                 }
@@ -989,7 +1058,7 @@ class Peer {
 
               await checkHits(msg.from);
 
-              const {message, replyId} = payload.reply;
+              const {message, replyId} = payload;
               const replyPublicKey = this._replyHosts.get(replyId);
               this._replyHosts.delete(replyId);
 
@@ -1003,8 +1072,14 @@ class Peer {
                   this._replyCallbacks.delete(replyId);
 
                   try {
-                    replyCb(null, verified);
+                    replyCb(verified);
                   } catch (err) {
+                  } finally {
+
+                    const {data: replyAck} = ack;
+
+                    await this._handleAck(replyAck);
+
                   }
                 }
               } else {
@@ -1013,7 +1088,7 @@ class Peer {
             }
             // end processing
           } catch (err) {
-            logger.error(err);
+            logger.error('Processing Error: ' + err.toString());
           }
         };
 
@@ -1047,8 +1122,8 @@ class Peer {
    * @returns {Promise<>} a promise that will complete when a message acknowledgement is received.
    */
   pub(peer, address, msg, timeout, callback) {
-    timeout = ((typeof timeout) === 'string') ? timeout : '120s';
     callback = ((typeof callback) === 'function') ? callback : ((typeof timeout) === 'function') ? timeout : null;
+    timeout = ((typeof timeout) === 'string') ? timeout : '180s';
 
     return new Promise(async (finished, failed) => {
       try {
@@ -1075,7 +1150,21 @@ class Peer {
         // and the function we want to trigger
         // as a callback.
         if ((typeof callback) === 'function') {
+          const original = callback;
           replyId = uuidv4();
+
+          callback = (msg) => {
+            original(msg);
+
+            // Let's go ahead and speed up
+            // the ack
+            add(this.ipfs, msgAck).then(async () => {
+              for (const replyAck of relayAcks) {
+                await add(this.ipfs, msgAck);
+              }
+            });
+          };
+
           this._replyCallbacks.set(replyId, callback);
           this._replyHosts.set(replyId, peerData.publicKey);
         }
@@ -1087,13 +1176,13 @@ class Peer {
             "type": "msg",
             "address": address,
             "message": msg,
-            "replyId": replyId
+            "replyId": replyId,
+            "relayAck": relayAcks // this is where the peer needs to send an ack back
           },
           "ack": {
             "data": msgAck
           },
-          "key": this._publicKey,
-          "relayAck": relayAcks // this is where the peer needs to send an ack back
+          "key": this._publicKey
         };
 
         // encrypt the data
@@ -1151,9 +1240,7 @@ class Peer {
             await this._doPeerCheck();
           }, 15000))
 
-          // does the acknowledgement exist?
-          const ackHash = await Hash.of(Buffer.from(msgAck));
-          const ackData = await cat(node, ackHash, timeout);
+          const ackData = await this._waitForAck(msgAck);
 
           // since the data was added to IPFS, we know the peer
           // received the data.

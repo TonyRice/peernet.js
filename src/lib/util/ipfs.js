@@ -30,8 +30,8 @@ export async function cat(node , hash, timeout) {
     timeout = timeout ? timeout : '60s';
 
     try {
-        const stream = node.cat(hash, {'timeout': timeout})
-        let data = ''
+        const stream = node.cat(hash, {'timeout': timeout});
+        let data = '';
         for await (const chunk of stream) {
             data += chunk.toString()
         }
@@ -62,11 +62,11 @@ export async function unpin(node, cid) {
     return await node.pin.rm(cid);
 }
 
-export async function connect(node, peer) {
-    await node.swarm.connect(peer);
+export async function connect(node, addr) {
+    await node.swarm.connect(addr);
 }
 
-export async function disconnect(node, peer) {
-    await node.swarm.disconnect(peer);
+export async function disconnect(node, addr) {
+    await node.swarm.disconnect(addr);
 }
 

@@ -1,4 +1,4 @@
-const path = require('path');
+const path = require('path')
 
 // WIP - do not use
 const webConfig = {
@@ -6,7 +6,7 @@ const webConfig = {
   target: 'web',
   output: {
     path: path.resolve(__dirname, 'dist'),
-    filename: 'bundle.js'
+    filename: 'bundle.js',
   },
   mode: 'production',
   module: {
@@ -17,24 +17,28 @@ const webConfig = {
         use: {
           loader: 'babel-loader',
           options: {
-            presets: [['@babel/preset-env',
-              {
-                modules: false,
-              }]],
+            presets: [
+              [
+                '@babel/preset-env',
+                {
+                  modules: false,
+                },
+              ],
+            ],
             plugins: [
               '@babel/plugin-proposal-private-methods',
               '@babel/plugin-proposal-class-properties',
-              '@babel/plugin-transform-runtime'
-            ]
-          }
-        }
-      }
-    ]
+              '@babel/plugin-transform-runtime',
+            ],
+          },
+        },
+      },
+    ],
   },
-  node : {
-    fs: 'empty'
-  }
-};
+  node: {
+    fs: 'empty',
+  },
+}
 
 // This is the main configuration object.
 // Here you write different options and tell Webpack what to do

@@ -1,3 +1,3 @@
-import Peer from './lib/peernet.js';
+import Peer from './lib/peernet.js'
 
-export default Peer;
+export default Peer

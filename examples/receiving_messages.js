@@ -10,7 +10,7 @@ import Peer from '../src/esm.js';
 
         await peer.start();
 
-        await peer.sub((address, msg) => {
+        await peer.receive(true).sub((address, msg) => {
             console.log('Got a message! ' + msg);
             return msg;
         });

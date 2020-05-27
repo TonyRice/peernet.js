@@ -1,6 +1,6 @@
 {
   "name": "peernet-js",
-  "version": "0.0.25",
+  "version": "0.0.26",
   "description": "peernet.js provides a simple message acknowledgement layer built using OpenPGP and IPFS pubsub.",
   "main": "src/index.js",
   "scripts": {

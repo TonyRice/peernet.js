@@ -733,12 +733,11 @@ class Peer {
           if (hits === 1) {
             // in 15s we will clear it
             hitTimers[from] = setTimeout(() => {
-              delete hitTimers[from]
+              delete hitTimers[from];
               delete msgHits[from];
             }, 15000);
 
           } else {
-            if (this._relayedPeers)
             // If we have more than 50 messages within 15 seconds
             // it's pretty safe to assume they're sending too many
             // messages

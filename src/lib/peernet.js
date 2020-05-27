@@ -139,28 +139,28 @@ class Peer {
 
     const peerData = await this._getPeerData(peer);
 
-    const path = '/msgs/' + peerData.topic + '/';
-
-    const files = await this.ipfs.files.ls(path);
+    const path = '/msgs/' + peerData.address + '/';
 
     const msgs = [];
 
-    for (const file of files) {
-      if (msgs.length >= count) {
-        break;
-      }
-      const cid = file.cid;
-      msgs.push(cid);
-      try {
+    try {
+      for await (const file of this.ipfs.files.ls(path)) {
+        if (msgs.length >= count) {
+          break;
+        }
+        const cid = file.cid;
+        msgs.push(cid);
+        try {
 
-        await this.ipfs.files.delete(path + file.name);
-      } catch (e) {
-
+          await this.ipfs.files.delete(path + file.name);
+        } catch (e) {
+        }
       }
+    } catch(ignored){
     }
 
     return msgs;
-  }
+  };
 
   _getPeerData = (async (peer) => {
     this._checkInitialized();
@@ -444,7 +444,7 @@ class Peer {
             const retrieveMsg = {
               "payload": {
                 'type': 'retrieve',
-                'count': 15
+                'count': await sign(this._privateKey, this._privateKeyPass, "15")
               },
               "ack": {
                 "data": relayAckData
@@ -452,7 +452,7 @@ class Peer {
               "key": this._publicKey
             };
 
-            const encrypted = await encrypt(relayPubKey, retrieveMsg);
+            const encrypted = await encrypt(relayPubKey, JSON.stringify(retrieveMsg));
 
             await node.pubsub.publish(relayPeerData.address, encrypted);
 
@@ -657,6 +657,7 @@ class Peer {
         };
 
         const receiveMsg = async (msg) => {
+
           try {
 
             if (this._passthrough === true) {
@@ -669,13 +670,16 @@ class Peer {
               return;
             }
 
+
             const decrypted = await decrypt(this._privateKeyArmored, this._privateKeyPass, msgData);
 
-            const _data = JSON.parse(decrypted);
 
+            const _data = JSON.parse(decrypted);
             const {ack, payload, key} = _data;
 
+
             const {type} = payload;
+
 
             // let's go ahead and craft a reply.
             const peerData = await this._getPeerData(key);
@@ -807,22 +811,30 @@ class Peer {
 
                 if (count != null) {
 
-                  const msgs = await this._retrieveMessages(peerData.publicKey, count);
+                  const msgs = await this._retrieveMessages(peerData.publicKey, Number.parseInt(count));
 
                   const signedMsg = await sign(this._privateKeyArmored, this._privateKeyPass, JSON.stringify(msgs));
 
-                  const respMsg = JSON.stringify({
+                  const retrieveAckData = randomData();
+
+                  const respMsg = {
                     'payload': {
-                      'response': signedMsg
+                      'response': signedMsg,
+                      'type' : 'response'
                     },
-                    'key': this._publicKey
-                  });
+                    'key': this._publicKey,
+                    'ack' : {
+                      data: retrieveAckData
+                    }
+                  }
+
+                  const respEnc = await encrypt(peerData.publicKey, JSON.stringify(respMsg))
 
                   const repeat = setInterval(async () => {
-                    await node.pubsub.publish(peerData.address, respMsg);
+                    await node.pubsub.publish(peerData.address, respEnc);
                   }, 2500);
 
-                  await node.pubsub.publish(peerData.address, respMsg);
+                  await node.pubsub.publish(peerData.address, respEnc);
 
                   const {data: msgAck} = ack;
 
@@ -847,9 +859,6 @@ class Peer {
 
                   try {
 
-
-                    const {data: retrieveAckData} = ack;
-
                     const retrieveAckHash = await Hash.of(Buffer.from(retrieveAckData));
 
                     // let's relay this until we got the ack.
@@ -870,7 +879,7 @@ class Peer {
             } else if (type === 'response') {
               // we will only handle response messages
               // from a relay peer
-              if (this._relayPeers.has(peerData.address)) {
+              if (this._relays.indexOf(peerData.address) > -1) {
                 const messages = await verify(peerData.publicKey, payload['response']);
 
                 if (messages != null) {

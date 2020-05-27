@@ -908,7 +908,7 @@ class Peer {
 
               await checkHits(msg.from);
 
-              const {data: relayMsg, peer: relayPeer, reply} = payload.relay;
+              const {data: relayMsg, peer: relayPeer, reply} = payload;;
 
               const {address: topic} = await this._getPeerData(relayPeer);
 
@@ -1107,12 +1107,10 @@ class Peer {
 
           const relayMsg = JSON.stringify({
             'payload': {
-              'relay': {
-                'type': 'relay',
-                'data': encrypted,
-                'peer': peerData.publicKey,
-                "reply": replyId != null // tell the relay to attempt to relay replies
-              }
+              'type': 'relay',
+              'data': encrypted,
+              'peer': peerData.publicKey,
+              "reply": replyId != null // tell the relay to attempt to relay replies
             },
             'key': this._publicKey,
             'ack': {

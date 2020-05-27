@@ -8,6 +8,7 @@ import {sleep, uuidv4, randomData} from './util/index.js';
 import {add, cat, pin, connect, disconnect, DEFAULT_BOOTSTRAP, DEFAULT_BOOTSTRAP_BROWSER} from './util/ipfs.js';
 import logger from './util/logger.js';
 
+
 const PEERNET_BOOTSTRAP = [
   "/dns4/arthur.bootstrap.peernet.dev/tcp/4001/p2p/QmaM3FbA8amt6WGeN9Zq7zz8EmGxwdcAeHtcAUx3SoxkWF",
   "/dns4/john.bootstrap.peernet.dev/tcp/4001/p2p/QmcSJKAznvnnVKyWbRhzJDTqLnp1LuNXS8ch9SwcR713bX",
@@ -148,7 +149,7 @@ class Peer {
         if (msgs.length >= count) {
           break;
         }
-        const cid = file.cid;
+        const cid = file.cid.toString();
         msgs.push(cid);
         try {
 
@@ -206,10 +207,13 @@ class Peer {
 
     const address = sha1(peerPubKey.replace('\r\n', '').replace('\n').trim() + '.address');
 
+    const peerCid = await add(this.ipfs, peerPubKey);
+
     const data = {
       'publicKey': peerPubKey,
-      'address': Base64.stringify(address)
-    }
+      'address': Base64.stringify(address),
+      'cid': peerCid
+    };
 
     this._peerPubKeyCache.set(peer, data);
 
@@ -426,7 +430,7 @@ class Peer {
 
         // this is experimental functionality - this will go
         // ahead and attempt to retrieve any messages from any peers
-        this._retrieveTimer = setInterval(async () => {
+        this._retrieveTimer = setImmediate(async () => {
 
           const peer = await this._getPeerData(this._publicKey);
 
@@ -879,7 +883,8 @@ class Peer {
             } else if (type === 'response') {
               // we will only handle response messages
               // from a relay peer
-              if (this._relays.indexOf(peerData.address) > -1) {
+              if (this._relays.indexOf(peerData.cid) > -1) {
+
                 const messages = await verify(peerData.publicKey, payload['response']);
 
                 if (messages != null) {
@@ -890,7 +895,9 @@ class Peer {
 
                   // TODO how do we handle this???
                   for (const message of msgs) {
+
                     const data = await cat(this.ipfs, message, '15s');
+
 
                     if (data != null) {
                       logger.debug('Handling retrieved message');
@@ -943,6 +950,13 @@ class Peer {
 
                 try {
 
+                  const msgHash = '/msgs/' + topic + '/' + uuidv4();
+
+                  await this.ipfs.files.write(msgHash, relayMsg, {
+                    create: true,
+                    parents: true
+                  });
+
                   const {data: relayAckData} = ack;
 
                   const relayAckHash = await Hash.of(Buffer.from(relayAckData));
@@ -951,18 +965,9 @@ class Peer {
                   const detectedAckData = await cat(node, relayAckHash, '30s');
 
                   if (detectedAckData === relayAckData) {
-                    logger.debug('Relay ack received! ' + relayAckHash)
+                    logger.debug('Relay ack received! ' + relayAckHash);
+                    await this.ipfs.files.delete(msgHash);
                   } else {
-                    if (detectedAckData === null) {
-
-                      // Let's store this message to be retrieved later
-                      const msgHash = '/msgs/' + topic + '/' + uuidv4();
-
-                      await this.ipfs.files.write(msgHash, relayMsg, {
-                        create: true,
-                        parents: true
-                      });
-                    }
                   }
 
                 } catch (err) {

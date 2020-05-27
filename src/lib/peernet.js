@@ -573,7 +573,7 @@ class Peer {
   passthrough(passthrough) {
     this._passthrough = passthrough === true;
     this._handleMessages = passthrough === true ? false : this._handleMessages;
-    this._relayMessages = passthrough === true ? false : this._handleMessages;
+    this._relayMessages = passthrough === true ? false : this._relayMessages;
 
     return this;
   }

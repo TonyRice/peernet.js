@@ -151,9 +151,9 @@ class Peer {
         }
         const cid = file.cid.toString();
         msgs.push(cid);
-        try {
 
-          await this.ipfs.files.delete(path + file.name);
+        try {
+          await this.ipfs.files.rm(path + file.name);
         } catch (e) {
         }
       }
@@ -430,7 +430,7 @@ class Peer {
 
         // this is experimental functionality - this will go
         // ahead and attempt to retrieve any messages from any peers
-        this._retrieveTimer = setImmediate(async () => {
+        this._retrieveTimer = setInterval(async () => {
 
           const peer = await this._getPeerData(this._publicKey);
 
@@ -704,6 +704,8 @@ class Peer {
                 return;
               }
 
+              console.log('got a message');
+
               await checkHits(msg.from);
 
               const {data: msgAck} = ack;
@@ -725,6 +727,7 @@ class Peer {
 
                   // this should return null
                   if (detectedAck != null) {
+                    logger.debug('Ack already exists. Not handling message.');
                     return null;
                   }
                 }
@@ -830,7 +833,7 @@ class Peer {
                     'ack' : {
                       data: retrieveAckData
                     }
-                  }
+                  };
 
                   const respEnc = await encrypt(peerData.publicKey, JSON.stringify(respMsg))
 
@@ -898,9 +901,8 @@ class Peer {
 
                     const data = await cat(this.ipfs, message, '15s');
 
-
                     if (data != null) {
-                      logger.debug('Handling retrieved message');
+                      logger.debug('Handling retrieved message ' + peer.address);
                       await this.ipfs.pubsub.publish(peer.address, data);
                     }
                   }
@@ -925,6 +927,17 @@ class Peer {
 
                 // We can't really trust this message. but what is there not to trust?
                 // we're only sending it off somewhere!
+                const {data: relayAckData} = ack;
+
+                const relayAckHash = await Hash.of(Buffer.from(relayAckData));
+
+                const detectedAck = await cat(node, relayAckHash, '5s');
+
+                // this should return null
+                if (detectedAck != null) {
+                  logger.debug('Relay ack already exists. Not relaying message.');
+                  return null;
+                }
 
                 logger.debug('Relaying direct message to: ' + topic);
 
@@ -957,10 +970,6 @@ class Peer {
                     parents: true
                   });
 
-                  const {data: relayAckData} = ack;
-
-                  const relayAckHash = await Hash.of(Buffer.from(relayAckData));
-
                   // let's relay this until we got the ack.
                   const detectedAckData = await cat(node, relayAckHash, '30s');
 
@@ -968,8 +977,8 @@ class Peer {
                     logger.debug('Relay ack received! ' + relayAckHash);
                     await this.ipfs.files.delete(msgHash);
                   } else {
+                    logger.debug('Failed to relay direct message to: ' + topic);
                   }
-
                 } catch (err) {
                   logger.error(err);
                 } finally {

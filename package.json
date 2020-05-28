@@ -17,6 +17,7 @@
     "ipfs": "^0.44.0",
     "ipfs-only-hash": "^2.0.1",
     "openpgp": "^4.10.4",
+    "uuidv4": "^6.1.0",
     "winston": "^3.2.1",
     "winston-transport-browserconsole": "^1.0.5"
   },

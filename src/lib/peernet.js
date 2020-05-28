@@ -1002,7 +1002,7 @@ class Peer {
                 // this should return null
                 if (detectedAck != null) {
                   logger.debug('Relay ack already exists. Not relaying message.');
-                  return null;
+                  return;
                 }
 
                 logger.debug('Relaying direct message to: ' + topic);
@@ -1157,11 +1157,11 @@ class Peer {
 
             // Let's go ahead and speed up
             // the ack
-            add(this.ipfs, msgAck).then(async () => {
+            /*add(this.ipfs, msgAck).then(async () => {
               for (const replyAck of relayAcks) {
                 await add(this.ipfs, msgAck);
               }
-            });
+            })*/
           };
 
           this._replyCallbacks.set(replyId, callback);

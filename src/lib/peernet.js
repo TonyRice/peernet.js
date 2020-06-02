@@ -5,7 +5,7 @@ import Base64 from 'crypto-js/enc-base64.js';
 import ipfsClient from 'ipfs-http-client';
 import {generateKeyPair, sign, encrypt, decrypt, verify} from './util/crypto.js';
 import {sleep, uuidv4, randomData} from './util/index.js';
-import {add, cat, pin, connect, disconnect, DEFAULT_BOOTSTRAP, DEFAULT_BOOTSTRAP_BROWSER} from './util/ipfs.js';
+import {add, cat, upin, pin, connect, disconnect, DEFAULT_BOOTSTRAP, DEFAULT_BOOTSTRAP_BROWSER} from './util/ipfs.js';
 import logger from './util/logger.js';
 
 
@@ -22,54 +22,80 @@ const PEERNET_BOOTSTRAP_BROWSER = [
 ];
 
 class Peer {
-  _started = false;
 
-  _bootstraps;
-  _proxyMode;
-  _proxyHost;
+  constructor(config) {
+    this._started = false;
 
-  _publicKey;
-  _privateKey;
-  _privateKeyArmored;
-  _privateKeyPass;
+    config = config ? config : {
+      relays: []
+    };
 
-  _relayMessages;
-  _handleMessages;
+    this._relayedPeers = new Map();
 
-  _passthrough;
-  _passthroughPeers;
+    this._subscriptions = new Map();
 
-  _checkPubAcks;
-  _ackExists;
-  _storeAck;
+    this._replyHosts = new Map();
+    this._msgCache = new Map();
 
-  _relays;
-  _relayPeers;
-  _relayedPeers = new Map();
+    this._replyCallbacks = new Map();
+    this._peerPubKeyCache = new Map();
 
-  _subscriptions = new Map();
+    this._bootstraps = config.bootstrap ? config.bootstrap : [];
 
-  _replyHosts = new Map();
-  _msgCache = new Map();
+    if ((typeof window) === 'object') {
+      this._bootstraps = this._bootstraps.concat(PEERNET_BOOTSTRAP_BROWSER);
+    } else {
+      this._bootstraps = this._bootstraps.concat(PEERNET_BOOTSTRAP);
+    }
 
-  _replyCallbacks = new Map();
-  _peerPubKeyCache = new Map();
+    this._proxyMode = config.proxy ? config.proxy === true : false;
+    this._proxyHost = config.proxyHost ? config.proxyHost : 'http://localhost:5001';
+    this._publicKey = config.publicKey ? config.publicKey : null;
+    this._privateKey = config.privateKey ? config.privateKey : null;
+    this._privateKeyPass = config.privateKeyPass ? config.privateKeyPass : null;
 
-  _config;
+    // this will tell the server to act as a passthrough relay for it's own messages
+    this._passthrough = config.passthrough ? config.passthrough === true : false;
 
-  _bootstrapTimer = -1;
+    // these are hosts we wish to handle data for in a passthrough manner.
+    this._passthroughPeers = config.passthroughPeers ? config.passthroughPeers : [];
+
+    // this tells the node that it is able to relay messages directly
+    this._relayMessages = config.relay ? config.relay === true && this._passthrough === false : false;
+    // trusted hosts are hosts that we allow messages to be relayed
+    // to if we are in relay mode.
+    this._relayPeers = config.relayPeers ? config.relayPeers : [];
+
+    // this tells the node that it will receive and process messages directly.
+    this._handleMessages = config.receive ? config.receive === true && this._passthrough === false : false;
+
+    // If a peer is considered a single peer, it won't check for acks
+    this._checkPubAcks = config.standalone ? config.standalone !== true : true;
+
+    this._ackExists = (typeof config.ackExists) === 'function' ? config.ackExists : null;
+    this._storeAck = (typeof config.storeAck) === 'function' ? config.storeAck : null;
+
+    // this is where we will send any relay data to.
+    // these nodes help ensure deliverability of our messages.
+    this._relays = config.relays ? config.relays : [];
+
+    this._config = config ? config : {};
+
+    this._bootstrapTimer = -1;
+
+  }
 
   // Note: private methods are declared as variables for
   // NodeJS 12.x.x support
-  _checkInitialized = () => {
+  async _checkInitialized() {
     if (this.ipfs !== null && this._started === true) {
       return;
     }
 
     throw "Not initialized!";
-  }
+  };
 
-  _doPeerCheck = async () => {
+  async _doPeerCheck() {
     // let's check for any dead peers
     const peers = await this.ipfs.swarm.peers();
 
@@ -138,7 +164,7 @@ class Peer {
     }
   }
 
-  _reconnectBootstraps = async () => {
+  async _reconnectBootstraps() {
     const _peerId = await this.ipfs.id();
     const peers = await this.ipfs.swarm.peers();
     const peerAddrs = peers.map((peer) => {
@@ -165,7 +191,7 @@ class Peer {
     }
   };
 
-  _waitForAck = async (ackData, timeout) => {
+  async _waitForAck(ackData, timeout) {
     timeout = timeout ? timeout : '30s';
 
     try {
@@ -189,12 +215,18 @@ class Peer {
     return null;
   };
 
-  _handleAck = async (ackData) => {
+  async _handleAck(ackData) {
     const ackCid = await add(this.ipfs, ackData);
 
     try {
       await pin(this.ipfs, ackCid);
     } catch (ignored) {
+    } finally {
+      setTimeout(async () => {
+        try {
+          await unpin(this.ipfs, ackCid);
+        } catch (ignored){}
+      }, 60000 * 5);
     }
 
     // run our custom function
@@ -212,14 +244,13 @@ class Peer {
     return ackCid;
   };
 
-  _storeMessage = async (peer) => {
+  async _storeMessage(peer) {
     const peerData = await this._getPeerData(peer);
 
     // todo handle this
   }
 
-  _retrieveMessages = async (peer, count) => {
-
+  async _retrieveMessages (peer, count) {
     const peerData = await this._getPeerData(peer);
 
     const path = '/msgs/' + peerData.address + '/';
@@ -243,9 +274,9 @@ class Peer {
     }
 
     return msgs;
-  };
+  }
 
-  _getPeerData = (async (peer) => {
+  async _getPeerData(peer) {
     this._checkInitialized();
 
     const ipfs = this.ipfs;
@@ -300,56 +331,6 @@ class Peer {
     this._peerPubKeyCache.set(peer, data);
 
     return Promise.resolve(data);
-  });
-
-  constructor(config) {
-    config = config ? config : {
-      relays: []
-    };
-
-    this._bootstraps = config.bootstrap ? config.bootstrap : [];
-
-    if ((typeof window) === 'object') {
-      this._bootstraps = this._bootstraps.concat(PEERNET_BOOTSTRAP_BROWSER);
-    } else {
-      this._bootstraps = this._bootstraps.concat(PEERNET_BOOTSTRAP);
-    }
-
-    this._proxyMode = config.proxy ? config.proxy === true : false;
-    this._proxyHost = config.proxyHost ? config.proxyHost : 'http://localhost:5001';
-    this._publicKey = config.publicKey ? config.publicKey : null;
-    this._privateKey = config.privateKey ? config.privateKey : null;
-    this._privateKeyPass = config.privateKeyPass ? config.privateKeyPass : null;
-
-    // this will tell the server to act as a passthrough relay for it's own messages
-    this._passthrough = config.passthrough ? config.passthrough === true : false;
-
-    // these are hosts we wish to handle data for in a passthrough manner.
-    this._passthroughPeers = config.passthroughPeers ? config.passthroughPeers : [];
-
-    // this tells the node that it is able to relay messages directly
-    this._relayMessages = config.relay ? config.relay === true && this._passthrough === false : false;
-    // trusted hosts are hosts that we allow messages to be relayed
-    // to if we are in relay mode.
-    this._relayPeers = config.relayPeers ? config.relayPeers : [];
-
-    // this tells the node that it will receive and process messages directly.
-    this._handleMessages = config.receive ? config.receive === true && this._passthrough === false : false;
-
-    // If a peer is considered a single peer, it won't check for acks
-    this._checkPubAcks = config.standalone ? config.standalone !== true : true;
-
-    this._ackExists = (typeof config.ackExists) === 'function' ? config.ackExists : null;
-    this._storeAck = (typeof config.storeAck) === 'function' ? config.storeAck : null;
-
-    // this is where we will send any relay data to.
-    // these nodes help ensure deliverability of our messages.
-    this._relays = config.relays ? config.relays : [];
-
-    this._config = config ? config : {};
-
-    this._bootstrapTimer = -1;
-
   }
 
   async start() {
@@ -995,16 +976,6 @@ class Peer {
                 // we're only sending it off somewhere!
                 const {data: relayAckData} = ack;
 
-                const relayAckHash = await Hash.of(Buffer.from(relayAckData));
-
-                const detectedAck = await cat(node, relayAckHash, '5s');
-
-                // this should return null
-                if (detectedAck != null) {
-                  logger.debug('Relay ack already exists. Not relaying message.');
-                  return;
-                }
-
                 logger.debug('Relaying direct message to: ' + topic);
 
                 // we do this to attempt to support the
@@ -1027,7 +998,7 @@ class Peer {
 
                 try {
 
-                  const msgHash = '/msgs/' + topic + '/' + uuidv4();
+                  const msgHash = '/msgs/' + topic + '/' + (payload.id ? payload.id : uuidv4());
 
                   logger.debug('Adding message for temporary storage: ' + msgHash);
 
@@ -1128,7 +1099,6 @@ class Peer {
       try {
         this._checkInitialized();
 
-
         // retrieve the peer data for the
         // peer we wish to send a message to.
         const node = this.ipfs,
@@ -1143,30 +1113,31 @@ class Peer {
           return randomData()
         });
 
-        let replyId = null;
+        const original = callback;
 
+        const replyId = uuidv4();
         // generate a reply id and store the peer
         // and the function we want to trigger
         // as a callback.
-        if ((typeof callback) === 'function') {
-          const original = callback;
-          replyId = uuidv4();
 
-          callback = (msg) => {
+
+
+        callback = (msg) => {
+          if ((typeof original) === 'function') {
             original(msg);
+          }
 
-            // Let's go ahead and speed up
-            // the ack
-            /*add(this.ipfs, msgAck).then(async () => {
-              for (const replyAck of relayAcks) {
-                await add(this.ipfs, msgAck);
-              }
-            })*/
-          };
+          // Let's go ahead and speed up
+          // the ack
+          add(this.ipfs, msgAck).then(async () => {
+            for (const replyAck of relayAcks) {
+              await add(this.ipfs, msgAck);
+            }
+          });
+        };
 
-          this._replyCallbacks.set(replyId, callback);
-          this._replyHosts.set(replyId, peerData.publicKey);
-        }
+        this._replyCallbacks.set(replyId, callback);
+        this._replyHosts.set(replyId, peerData.publicKey);
 
         // create the payload that will be
         // sent to the peer.
@@ -1212,7 +1183,8 @@ class Peer {
               'type': 'relay',
               'data': encrypted,
               'peer': peerData.publicKey,
-              "reply": replyId != null // tell the relay to attempt to relay replies
+              "reply": replyId != null, // tell the relay to attempt to relay replies
+              "id" : uuidv4()
             },
             'key': this._publicKey,
             'ack': {

@@ -27,8 +27,7 @@ export const DEFAULT_BOOTSTRAP_BROWSER = [
 ];
 
 export async function cat(node , hash, timeout) {
-    timeout = timeout ? timeout : '60s';
-
+    timeout = timeout ? timeout : '120s';
     try {
         const stream = node.cat(hash, {'timeout': timeout});
         let data = '';
@@ -41,11 +40,14 @@ export async function cat(node , hash, timeout) {
     return null;
 }
 
-export async function add(node, data) {
+export async function add(node, data, timeout) {
+    timeout = timeout ? timeout : '120s';
     try {
-        for await (const {cid} of node.add(data)) {
+        for await (const {cid} of node.add(data, {
+          timeout: timeout
+        })) {
             if(cid) {
-                return cid.toString();
+              return cid.toString();
             }
         }
     } catch (err) {
@@ -54,12 +56,36 @@ export async function add(node, data) {
     return null;
 }
 
-export async function pin(node, cid) {
-    return await node.pin.add(cid);
+export async function pin(node, cid, timeout) {
+    timeout = timeout ? timeout : '120s'
+    return await node.pin.add(cid, {
+      timeout: timeout
+    });
 }
 
-export async function unpin(node, cid) {
+export async function unpin(node, cid, purge) {
+  purge = purge ? purge : false;
+  try {
+    if (purge) {
+      try {
+        await node.pin.rm(cid);
+      } catch (ignored) {
+      }
+      await gc(node);
+    }
     return await node.pin.rm(cid);
+  } catch (err) {
+  }
+  return Promise.resolve();
+}
+
+export async function hash(data) {
+  return Promise.resolve(Hash.of(Buffer.from(data)));
+}
+
+export async function gc(node) {
+  for await (const res of node.repo.gc()) {
+  }
 }
 
 export async function connect(node, addr) {

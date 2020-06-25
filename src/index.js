@@ -1,3 +1,5 @@
 require = require('esm')(module)
 
-module.exports = require('./esm.js');
+const esmModule = require('./esm.js');
+
+module.exports = esmModule.default;

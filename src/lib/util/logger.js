@@ -9,31 +9,30 @@ const formatter = combine(
   printf(({ level, message, label, timestamp }) => {
     return `[${label}] ${timestamp} ${level}: ${message}`
   })
-)
+);
 
-let transports = []
+let transports = [];
 
-if (typeof window !== 'undefined') {
-  transports.concat([
+if (typeof window !== 'undefined' && typeof jQuery !== 'undefined') {
+  transports = transports.concat([
     new BrowserConsole({
       format: winston.format.simple(),
-      level: 'info',
+      level: 'debug'
     }),
+  ])
+} else {
+  transports = transports.concat([
+    new winston.transports.Console({
+      format: formatter,
+      level: 'debug'
+    })
   ])
 }
 
 const logger = winston.createLogger({
-  level: process.env.NODE_ENV !== 'production' ? 'debug' : 'info',
+  level: process.env.PEERNET_LOG_LEVEL ? process.env.PEERNET_LOG_LEVEL : 'info',
   format: formatter,
   transports: transports,
 })
-
-if (process.env.NODE_ENV !== 'production') {
-  logger.add(
-    new winston.transports.Console({
-      format: formatter,
-    })
-  )
-}
 
 export default logger
